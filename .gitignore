@@ -1,0 +1,18 @@
+# ── Android / Gradle build artifacts ──────────────────────────────────────────
+.gradle/
+build/
+/app/build/
+*.apk
+*.aab
+
+# ── Machine-specific ──────────────────────────────────────────────────────────
+local.properties          # SDK path differs per machine
+.cxx/                      # NDK/CMake intermediate build files
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+*.iml
+.DS_Store
+
+# ── Capture output (large; not source) ────────────────────────────────────────
+/captures/

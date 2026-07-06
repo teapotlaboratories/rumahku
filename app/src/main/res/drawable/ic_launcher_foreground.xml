@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon foreground: a simple house glyph on the transparent layer.
+     The 108dp canvas with content in the centre ~72dp keeps it inside the
+     "safe zone" that Android may crop to a circle/squircle. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,30 L78,50 L78,78 L60,78 L60,62 L48,62 L48,78 L30,78 L30,50 Z" />
+</vector>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Activity-level theme. Because the UI is built with Jetpack Compose, this
+      base theme only needs to (a) remove the old action bar and (b) let content
+      draw edge-to-edge. All real colors come from RumahkuTheme in Compose.
+      We extend a framework Material theme to avoid pulling in an extra library.
+    -->
+    <style name="Theme.Rumahku" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>
