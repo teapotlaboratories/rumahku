@@ -9,10 +9,14 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,27 +29,27 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.ar.core.ArCoreApk
-import com.google.ar.core.Camera
+import com.google.ar.core.CameraConfigFilter
 import com.google.ar.core.Config
+import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.UnavailableException
 import com.teapotlab.rumahku.ar.ArRenderer
+import com.teapotlab.rumahku.ar.CoverageBuffer
 import com.teapotlab.rumahku.ar.DisplayRotationHelper
+import com.teapotlab.rumahku.capture.CaptureProgress
+import com.teapotlab.rumahku.capture.CaptureSession
 
 /**
  * The live scanning screen.
  *
- * Owns the ARCore [Session] and ties its lifecycle to the Activity:
- *   • onResume  → ensure ARCore is installed, create/resume the session
- *   • onPause   → pause the session and the GL surface
- *   • onDestroy → close the session and free the camera
- *
- * The camera feed is drawn by [ArRenderer] onto a [GLSurfaceView]; a small
- * Compose overlay on top shows the current tracking state as live feedback.
- * This slice is preview-only — keyframe capture is the next step.
+ * Owns the ARCore [Session] and ties its lifecycle to the Activity. On top of
+ * the camera preview it now drives a [CaptureSession]: tap "Start capture" and,
+ * as you move, keyframes (image + pose + intrinsics) are saved to disk while a
+ * live counter shows progress. Tap "Stop" to finalize transforms.json.
  */
 class CaptureActivity : ComponentActivity() {
 
@@ -54,25 +58,33 @@ class CaptureActivity : ComponentActivity() {
 
     private lateinit var glSurfaceView: GLSurfaceView
     private lateinit var displayRotationHelper: DisplayRotationHelper
+    private lateinit var captureSession: CaptureSession
 
-    // Compose observes this; the GL thread updates it once per frame.
+    // Shared world-space coverage dots: written during capture, drawn each frame.
+    private val coverageBuffer = CoverageBuffer()
+
+    // Compose observes these; the GL thread updates them (via runOnUiThread).
     private var status by mutableStateOf(CaptureStatus())
+    private var progress by mutableStateOf(CaptureProgress())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         displayRotationHelper = DisplayRotationHelper(this)
+        captureSession = CaptureSession(this, coverageBuffer) { p ->
+            runOnUiThread { progress = p }
+        }
 
         glSurfaceView = GLSurfaceView(this).apply {
             preserveEGLContextOnPause = true
             setEGLContextClientVersion(3)
-            // RGBA8 + 16-bit depth, no stencil — enough for camera + future 3D.
             setEGLConfigChooser(8, 8, 8, 8, 16, 0)
             setRenderer(
                 ArRenderer(
                     sessionProvider = { session },
                     displayRotationHelper = displayRotationHelper,
-                    onCameraState = ::onCameraState,
+                    coverageBuffer = coverageBuffer,
+                    onFrame = ::onFrame,
                 )
             )
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
@@ -81,31 +93,30 @@ class CaptureActivity : ComponentActivity() {
 
         setContent {
             Box(modifier = Modifier.fillMaxSize()) {
-                // The camera preview surface fills the screen.
                 AndroidView(factory = { glSurfaceView }, modifier = Modifier.fillMaxSize())
-                // Status overlay pinned to the top.
                 StatusOverlay(status)
+                CaptureControls(
+                    progress = progress,
+                    onToggle = {
+                        if (captureSession.isCapturing()) captureSession.stop()
+                        else captureSession.start()
+                    },
+                )
             }
         }
     }
 
-    /** Called on the GL thread every frame — hop to the UI thread to update state. */
-    private fun onCameraState(camera: Camera) {
-        val newStatus = CaptureStatus(
-            tracking = camera.trackingState,
-            reason = camera.trackingFailureReason,
-        )
-        // Only touch Compose state on the main thread.
-        runOnUiThread {
-            if (newStatus != status) status = newStatus
-        }
+    /** GL-thread per-frame callback: update status + feed the capture session. */
+    private fun onFrame(frame: Frame) {
+        val camera = frame.camera
+        val newStatus = CaptureStatus(camera.trackingState, camera.trackingFailureReason)
+        runOnUiThread { if (newStatus != status) status = newStatus }
+        captureSession.onFrame(frame)
     }
 
     override fun onResume() {
         super.onResume()
 
-        // Camera permission is requested on the diagnostics screen, but guard here
-        // too — this Activity could be launched directly.
         if (!hasCameraPermission()) {
             Toast.makeText(this, "Camera permission required", Toast.LENGTH_LONG).show()
             finish()
@@ -114,15 +125,17 @@ class CaptureActivity : ComponentActivity() {
 
         if (session == null) {
             try {
-                // Prompt to install/update Google Play Services for AR if needed.
                 when (ArCoreApk.getInstance().requestInstall(this, !installRequested)) {
                     ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
                         installRequested = true
-                        return  // We'll be resumed again after the install flow.
+                        return
                     }
                     ArCoreApk.InstallStatus.INSTALLED -> { /* ready */ }
                 }
-                session = Session(this).also(::configureSession)
+                session = Session(this).also { s ->
+                    selectHighestResCameraConfig(s)
+                    configureSession(s)
+                }
             } catch (e: UnavailableException) {
                 Log.e(TAG, "ARCore session unavailable", e)
                 Toast.makeText(this, "ARCore unavailable: ${e.message}", Toast.LENGTH_LONG).show()
@@ -131,7 +144,6 @@ class CaptureActivity : ComponentActivity() {
             }
         }
 
-        // Resume the session; the camera may momentarily be held by another app.
         try {
             session?.resume()
         } catch (e: CameraNotAvailableException) {
@@ -148,9 +160,9 @@ class CaptureActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        // Flush any in-progress capture so nothing is lost when leaving.
+        if (captureSession.isCapturing()) captureSession.stop()
         if (session != null) {
-            // Order matters: stop rendering before pausing the session so the GL
-            // thread doesn't touch a paused session.
             displayRotationHelper.onPause()
             glSurfaceView.onPause()
             session?.pause()
@@ -158,21 +170,34 @@ class CaptureActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        // Explicitly release the camera and native resources.
         session?.close()
         session = null
         super.onDestroy()
     }
 
-    /** Configures tracking options for this preview-only slice. */
+    /**
+     * Picks the camera config with the largest CPU image, so the frames we save
+     * via acquireCameraImage() are as high-resolution as the device offers —
+     * better input for the Gaussian splat.
+     */
+    private fun selectHighestResCameraConfig(session: Session) {
+        try {
+            val filter = CameraConfigFilter(session)
+            val best = session.getSupportedCameraConfigs(filter)
+                .maxByOrNull { it.imageSize.width * it.imageSize.height }
+            if (best != null) {
+                session.cameraConfig = best
+                Log.i(TAG, "camera config: CPU image ${best.imageSize.width}x${best.imageSize.height}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "could not select camera config; using default", e)
+        }
+    }
+
     private fun configureSession(session: Session) {
         val config = Config(session).apply {
             focusMode = Config.FocusMode.AUTO
-            // Don't block the GL thread waiting for a new camera image.
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-            // Depth stays OFF for now: we don't consume it yet, and ARCore's ML
-            // depth provider floods logcat with errors in low light. We'll turn
-            // it back on when we build the live point-cloud preview.
             depthMode = Config.DepthMode.DISABLED
         }
         session.configure(config)
@@ -187,7 +212,7 @@ class CaptureActivity : ComponentActivity() {
     }
 }
 
-/** Immutable snapshot of what to show in the overlay. */
+/** Immutable snapshot of what to show in the status overlay. */
 data class CaptureStatus(
     val tracking: TrackingState? = null,
     val reason: TrackingFailureReason? = null,
@@ -206,6 +231,37 @@ private fun StatusOverlay(status: CaptureStatus) {
                 .background(Color(0xAA000000), RoundedCornerShape(24.dp))
                 .padding(horizontal = 20.dp, vertical = 10.dp),
         )
+    }
+}
+
+@androidx.compose.runtime.Composable
+private fun CaptureControls(progress: CaptureProgress, onToggle: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 48.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "%d keyframes · %.1f m".format(progress.keyframes, progress.distanceMeters),
+                color = Color.White,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .background(Color(0xAA000000), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+            Button(
+                onClick = onToggle,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (progress.capturing) Color(0xFFD32F2F) else Color(0xFF00695C),
+                    contentColor = Color.White,
+                ),
+            ) {
+                Text(if (progress.capturing) "Stop" else "Start capture")
+            }
+        }
     }
 }
 

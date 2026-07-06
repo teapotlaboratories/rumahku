@@ -2,10 +2,13 @@ package com.teapotlab.rumahku.ar
 
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import android.opengl.Matrix
 import android.util.Log
-import com.google.ar.core.Camera
+import com.google.ar.core.Frame
 import com.google.ar.core.Session
+import com.google.ar.core.TrackingState
 import com.teapotlab.rumahku.ar.gl.BackgroundRenderer
+import com.teapotlab.rumahku.ar.gl.CoverageRenderer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -24,14 +27,22 @@ import javax.microedition.khronos.opengles.GL10
 class ArRenderer(
     private val sessionProvider: () -> Session?,
     private val displayRotationHelper: DisplayRotationHelper,
-    private val onCameraState: (Camera) -> Unit,
+    private val coverageBuffer: CoverageBuffer,
+    private val onFrame: (Frame) -> Unit,
 ) : GLSurfaceView.Renderer {
 
     private val backgroundRenderer = BackgroundRenderer()
+    private val coverageRenderer = CoverageRenderer()
+
+    // Scratch matrices reused each frame to avoid per-frame allocation.
+    private val projMatrix = FloatArray(16)
+    private val viewMatrix = FloatArray(16)
+    private val viewProjMatrix = FloatArray(16)
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         backgroundRenderer.createOnGlThread()
+        coverageRenderer.createOnGlThread()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -54,8 +65,20 @@ class ArRenderer(
             val frame = session.update()
             backgroundRenderer.draw(frame)
 
-            // Surface the camera pose/tracking state to whoever is listening.
-            onCameraState(frame.camera)
+            // Hand the frame to the listener (status overlay + keyframe capture).
+            // Runs on the GL thread — the only place the Frame is valid. Capture
+            // may append a coverage point here, which we then draw below.
+            onFrame(frame)
+
+            // Draw the coverage dots anchored in world space. Only meaningful
+            // while tracking, when the camera matrices are valid.
+            val camera = frame.camera
+            if (camera.trackingState == TrackingState.TRACKING) {
+                camera.getProjectionMatrix(projMatrix, 0, Z_NEAR, Z_FAR)
+                camera.getViewMatrix(viewMatrix, 0)
+                Matrix.multiplyMM(viewProjMatrix, 0, projMatrix, 0, viewMatrix, 0)
+                coverageRenderer.draw(viewProjMatrix, coverageBuffer.snapshot())
+            }
         } catch (t: Throwable) {
             // A dropped frame should never crash the render loop.
             Log.e(TAG, "exception on the OpenGL thread", t)
@@ -64,5 +87,7 @@ class ArRenderer(
 
     companion object {
         private const val TAG = "rumahku-render"
+        private const val Z_NEAR = 0.1f
+        private const val Z_FAR = 100f
     }
 }
