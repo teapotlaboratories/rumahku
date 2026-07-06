@@ -34,5 +34,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- The live scanning screen. configChanges lets it survive rotation
+             without being recreated (ARCore handles rotation itself). -->
+        <activity
+            android:name=".CaptureActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:theme="@style/Theme.Rumahku" />
     </application>
 </manifest>

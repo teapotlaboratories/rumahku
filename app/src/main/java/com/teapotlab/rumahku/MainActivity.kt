@@ -98,6 +98,17 @@ private fun DiagnosticsScreen() {
                     Text("Grant camera permission")
                 }
             }
+
+            // Ready to scan only when ARCore is available and we have the camera.
+            val canScan = arStatus == ArStatus.Ready && hasCamera
+            Button(
+                enabled = canScan,
+                onClick = {
+                    context.startActivity(android.content.Intent(context, CaptureActivity::class.java))
+                },
+            ) {
+                Text("Start scanning")
+            }
         }
     }
 }
