@@ -1,7 +1,0 @@
-[
-{
-  "directory": "/home/argonite/Developments/rumahku/app/.cxx/Debug/3i65c4w5/arm64-v8a",
-  "command": "/home/argonite/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android26 --sysroot=/home/argonite/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dnativecore_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fno-limit-debug-info  -fPIC -o CMakeFiles/nativecore.dir/native-lib.cpp.o -c /home/argonite/Developments/rumahku/app/src/main/cpp/native-lib.cpp",
-  "file": "/home/argonite/Developments/rumahku/app/src/main/cpp/native-lib.cpp"
-}
-]

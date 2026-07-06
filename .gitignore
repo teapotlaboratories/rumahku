@@ -6,8 +6,10 @@ build/
 *.aab
 
 # ── Machine-specific ──────────────────────────────────────────────────────────
-local.properties          # SDK path differs per machine
-.cxx/                      # NDK/CMake intermediate build files
+# SDK path differs per machine
+local.properties
+# NDK/CMake intermediate build files
+.cxx/
 
 # ── IDE ───────────────────────────────────────────────────────────────────────
 .idea/
