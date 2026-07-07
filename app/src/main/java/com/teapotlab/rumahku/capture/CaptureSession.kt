@@ -52,6 +52,13 @@ class CaptureSession(
     private var distanceMeters = 0f
     private var intrinsics: CameraIntrinsics? = null
 
+    // Tracking-stability gate: ARCore poses can jump while tracking settles
+    // (or briefly re-acquires). Capturing during that window produces garbage
+    // poses, so we require a run of stable TRACKING frames before capturing and
+    // reject implausible single-frame jumps.
+    private var stableTrackingFrames = 0
+    private var prevFramePose: Pose? = null
+
     fun isCapturing(): Boolean = capturing
 
     /** Begins a new capture session in its own timestamped directory. */
@@ -65,6 +72,8 @@ class CaptureSession(
         keyframeCount = 0
         distanceMeters = 0f
         intrinsics = null
+        stableTrackingFrames = 0
+        prevFramePose = null
         coverageBuffer.clear()
         capturing = true
         Log.i(TAG, "capture started → ${dir.absolutePath}")
@@ -88,9 +97,29 @@ class CaptureSession(
         if (!capturing) return
 
         val camera = frame.camera
-        if (camera.trackingState != TrackingState.TRACKING) return
+        if (camera.trackingState != TrackingState.TRACKING) {
+            // Lost tracking: reset the warm-up so we wait for it to re-settle.
+            stableTrackingFrames = 0
+            prevFramePose = null
+            return
+        }
 
         val pose = camera.pose
+
+        // Reject implausible single-frame jumps — a real hand can't move this
+        // fast; it means tracking glitched. Treat as instability.
+        val prev = prevFramePose
+        prevFramePose = pose
+        if (prev != null && translationBetween(prev, pose) > MAX_FRAME_JUMP_M) {
+            stableTrackingFrames = 0
+            return
+        }
+
+        // Warm-up: require a run of stable frames before capturing, so the first
+        // jittery poses after tracking (re)starts never become keyframes.
+        stableTrackingFrames++
+        if (stableTrackingFrames < TRACKING_WARMUP_FRAMES) return
+
         val last = lastKeyframePose
         if (last != null) {
             val moved = translationBetween(last, pose)
@@ -157,5 +186,7 @@ class CaptureSession(
         private const val MIN_TRANSLATION_M = 0.10f          // 10 cm
         private val MIN_ROTATION_RAD = Math.toRadians(12.0).toFloat()
         private const val COVERAGE_DISTANCE_M = 1.5f         // dot projected this far ahead
+        private const val TRACKING_WARMUP_FRAMES = 30        // ~1 s of stable tracking before capturing
+        private const val MAX_FRAME_JUMP_M = 0.30f           // single-frame move above this = tracking glitch
     }
 }
