@@ -71,7 +71,10 @@ class DatasetWriter(private val sessionDir: File) {
             val focal = intrinsics.focalLength        // [fx, fy] in pixels
             val principal = intrinsics.principalPoint // [cx, cy] in pixels
             val dims = intrinsics.imageDimensions      // [w, h]
-            root.put("camera_model", "PINHOLE")
+            // No camera_model field: ARCore gives an undistorted pinhole camera,
+            // and nerfstudio / Brush / instant-ngp all treat an absent model as
+            // pinhole. Emitting "PINHOLE" (a COLMAP term) is not recognized by
+            // those loaders and breaks the dataset.
             root.put("fl_x", focal[0].toDouble())
             root.put("fl_y", focal[1].toDouble())
             root.put("cx", principal[0].toDouble())
