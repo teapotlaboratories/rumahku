@@ -52,3 +52,21 @@ submitted as a Pull Request. Never push non-docs changes directly to
 
 When merging a PR, always use **Rebase and merge**. Never use a merge
 commit or squash merge.
+
+## 6. Keep a daily worklog under `docs/worklog/`
+
+Maintain a running worklog, **one file per day**, named
+`docs/worklog/YYYY-MM-DD.md` (local date). At the start of a work session,
+open (or create) that day's file and append to it as you go. Each entry should
+capture, briefly: what was done, key decisions/findings, commands or artifacts
+that matter, current state, and the next step to pick up. The goal is that any
+agent (or human) can resume cold by reading the latest worklog. Worklogs are
+docs, so Rule 3 applies (may go straight to `main`).
+
+## 7. Keep the bench setup documented under `docs/`
+
+Maintain `docs/BENCH.md` describing the hardware/lab bench used for the project
+— the machines, devices, GPUs, how they connect (mesh, SSH, adb), keys/hosts,
+and how to reach each one. Update it whenever the bench changes (a new device,
+host, key, or connection path). It is the single source of truth for "how do I
+connect to X"; do not rely on chat history for that.

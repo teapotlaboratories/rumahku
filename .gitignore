@@ -18,3 +18,7 @@ local.properties
 
 # ── Capture output (large; not source) ────────────────────────────────────────
 /captures/
+
+# Never commit device secrets
+pixel-pin
+*.pin
