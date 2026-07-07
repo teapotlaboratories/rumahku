@@ -70,3 +70,13 @@ Maintain `docs/BENCH.md` describing the hardware/lab bench used for the project
 and how to reach each one. Update it whenever the bench changes (a new device,
 host, key, or connection path). It is the single source of truth for "how do I
 connect to X"; do not rely on chat history for that.
+
+## 8. Write a design/plan doc before building
+
+Before implementing a milestone, phase, or any non-trivial feature, capture the
+plan first as a Markdown design doc under `docs/` (e.g. `docs/PHASE2.md`,
+`docs/M1.md`). It should cover: the goal, the approach and key decisions, the
+interface/API surface being added, risks (ranked), and a task sequence. Keep it
+updated as the design changes, and record the outcome (what shipped, what the
+spike proved) when done. Design docs are docs, so Rule 3 applies (may go
+straight to `main`); the implementation that follows obeys Rule 4 (branch + PR).
