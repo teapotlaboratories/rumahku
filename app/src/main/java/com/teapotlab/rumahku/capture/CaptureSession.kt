@@ -70,7 +70,7 @@ class CaptureSession(
     /** Begins a new capture session in its own timestamped directory. */
     fun start() {
         if (capturing) return
-        val root = context.getExternalFilesDir(null) ?: context.filesDir
+        val root = com.teapotlab.rumahku.rumahkuRoot(context)
         val dir = File(root, "captures/${System.currentTimeMillis()}")
         writer = DatasetWriter(dir)
         executor = Executors.newSingleThreadExecutor()
