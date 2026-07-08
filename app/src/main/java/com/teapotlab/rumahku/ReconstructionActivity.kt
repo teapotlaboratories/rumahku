@@ -12,14 +12,18 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -41,13 +45,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.teapotlab.rumahku.ui.theme.RumahkuTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.File
 
 /**
  * Reconstruction progress screen — the middle of the journey (see docs/UX.md).
@@ -113,6 +123,25 @@ private fun ReconstructionScreen(datasetDir: String, iters: Int, onClose: () -> 
         }
     }
 
+    // Live preview: render the current training splats every ~1.5 s (M2 "refine
+    // live") so you watch the splat sharpen. Null until the first splats exist.
+    val preview = remember(datasetDir) { loadPreviewParams(datasetDir) }
+    var previewBmp by remember { mutableStateOf<Bitmap?>(null) }
+    androidx.compose.runtime.LaunchedEffect(running) {
+        while (running && preview != null) {
+            delay(1500)
+            val outW = 480
+            val outH = (480L * preview.h / preview.w).toInt().coerceIn(1, 1200)
+            val px = withContext(Dispatchers.Default) {
+                BrushTrainer.nativeRenderTrainingPreview(
+                    preview.transform, 0f, 0f, 1f, preview.flX, preview.flY,
+                    preview.w, preview.h, outW, outH, if (preview.gravityUp) 1 else 0,
+                )
+            }
+            if (px != null) previewBmp = Bitmap.createBitmap(px, outW, outH, Bitmap.Config.ARGB_8888)
+        }
+    }
+
     val done = everRunning && !running
     val cancelled = done && result == ReconstructionService.CANCELLED
     val error = done && (result?.startsWith("ERROR") == true)
@@ -164,21 +193,36 @@ private fun ReconstructionScreen(datasetDir: String, iters: Int, onClose: () -> 
                     val pct = (iter.toFloat() / iters).coerceIn(0f, 1f)
                     Text("Building your 3D scan", style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold)
-                    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(180.dp)) {
-                        CircularProgressIndicator(
-                            progress = { if (iter > 0) pct else 0f },
-                            modifier = Modifier.size(180.dp),
-                            strokeWidth = 10.dp,
+                    val bmp = previewBmp
+                    if (bmp != null) {
+                        // Live splat preview — watch it converge.
+                        Image(
+                            bmp.asImageBitmap(), contentDescription = "live preview",
+                            modifier = Modifier.fillMaxWidth(0.92f)
+                                .aspectRatio(bmp.width.toFloat() / bmp.height)
+                                .clip(RoundedCornerShape(18.dp)),
+                            contentScale = ContentScale.Crop,
                         )
-                        Text(if (iter > 0) "${(pct * 100).toInt()}%" else "…",
-                            style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                        Text("${(pct * 100).toInt()}%  ·  $splats splats  ·  ${fmt(elapsed)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(180.dp)) {
+                            CircularProgressIndicator(
+                                progress = { if (iter > 0) pct else 0f },
+                                modifier = Modifier.size(180.dp),
+                                strokeWidth = 10.dp,
+                            )
+                            Text(if (iter > 0) "${(pct * 100).toInt()}%" else "…",
+                                style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                        }
+                        Text(friendlyMessage(iter),
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary)
+                        Text("$splats splats · ${fmt(elapsed)} elapsed",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Text(friendlyMessage(iter),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary)
-                    Text("$splats splats · ${fmt(elapsed)} elapsed",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("Keep the app open — it runs on the phone's GPU.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -211,3 +255,30 @@ private fun friendlyMessage(iter: Int): String = when {
 }
 
 private fun fmt(seconds: Long): String = "%d:%02d".format(seconds / 60, seconds % 60)
+
+/** Camera params to render the live-training preview from (a mid capture pose). */
+private class PreviewParams(
+    val transform: FloatArray, val flX: Float, val flY: Float,
+    val w: Int, val h: Int, val gravityUp: Boolean,
+)
+
+private fun loadPreviewParams(datasetDir: String): PreviewParams? {
+    return try {
+        val tj = File(datasetDir, "transforms.json").takeIf { it.exists() } ?: return null
+        val json = JSONObject(tj.readText())
+        val flX = json.optDouble("fl_x", 0.0).toFloat()
+        val flY = json.optDouble("fl_y", flX.toDouble()).toFloat()
+        val w = json.optInt("w"); val h = json.optInt("h")
+        val frames = json.getJSONArray("frames")
+        if (flX <= 0f || w <= 0 || h <= 0 || frames.length() == 0) return null
+        val tm = frames.getJSONObject(frames.length() / 2).getJSONArray("transform_matrix")
+        val m = FloatArray(16); var k = 0
+        for (r in 0 until 4) {
+            val row = tm.getJSONArray(r)
+            for (c in 0 until 4) m[k++] = row.getDouble(c).toFloat()
+        }
+        PreviewParams(m, flX, flY, w, h, json.optBoolean("gravity_up", false))
+    } catch (e: Exception) {
+        null
+    }
+}
