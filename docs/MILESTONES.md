@@ -114,7 +114,10 @@ splat on the device, semi-real-time. See `PHASE2.md`.
       Pixel 6; success/error badges compile (trivial icon-in-circle).
 - [x] **Rename / delete scans** (long-press card → manage dialog; rename persists
       to `name.txt`, delete has a confirm). Verified on Pixel 6.
-- [ ] Per-scan reconstruction progress on the card (vs global banner)
+- [x] **Per-scan build progress on the card**: the scan being reconstructed
+      shows a live ring + "Building N%" (service exposes `currentDir`; home polls
+      `nativeCurrentIter`). Replaces the global banner. Guard added so tapping a
+      building card doesn't start a second train. Verified on Pixel 6.
 - [ ] Scan detail sheet
 ### Reconstruction progress screen ✅ (done)
 - [x] `ReconstructionActivity` — tap a "Tap to build" card → starts the service,
