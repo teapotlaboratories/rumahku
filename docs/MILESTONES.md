@@ -39,12 +39,19 @@ splat on the device, semi-real-time. See `PHASE2.md`.
 - [ ] Stream keyframes into the trainer as you scan
 - [ ] Show the splat refining live (Brush's `SplatsUpdated` stream)
 
-### M3 — On-device seeding (the quality lever) 🔨 (validated + built; field test pending)
+### M3 — On-device seeding (the quality lever) ✅ (validated + field-tested)
 - [x] Validate the lever on-device: **+10.8 dB** seeded vs random (see `M3.md`)
 - [x] `SeedPointCloud` — accumulate ARCore feature points across frames
 - [x] `DatasetWriter` writes `seed.ply` + `ply_file_path` (Brush auto-seeds)
-- [ ] ⏸ **Field test**: real in-app scan → ARCore seed → reconstruct (needs
-      physical motion; can't be done from the bench)
+- [x] **Field test (real handheld scan)**: 43 keyframes + a **2288-point ARCore
+      seed** captured on a real room. Surfaced a real bug — **586 seed points were
+      NaN** (ARCore returns them; our `confidence < min` filter let them through
+      since `NaN < 0.3` is false), which aborted the trainer
+      (`assertion failed: !x.is_nan()`). **Fixed**: `SeedPointCloud` +
+      `DatasetWriter` now reject non-finite points. Re-ran on the cleaned scan →
+      seeded reconstruction runs (no crash).
+- [ ] ⬜ Color the seed points (sample the camera image at projection)
+- [ ] ⬜ Denser seed via the ARCore **Depth API**
 - [ ] ⬜ Color the seed points (sample the camera image at projection)
 - [ ] ⬜ Denser seed via the ARCore **Depth API**
 
@@ -83,10 +90,11 @@ splat on the device, semi-real-time. See `PHASE2.md`.
       also removes the need to force-kill mid-build (the likely abort trigger).
 
 ### Known issues
-- [ ] ⚠️ Native trainer **SIGABRT** seen once when a build was **force-killed**
-      mid-GPU-op (thread `brush-reconstru`, panic=abort). Now largely avoidable
-      via graceful Cancel; not reproducible in normal use. A belt-and-suspenders
-      fix (panic=unwind + catch_unwind in brush-ffi) remains a follow-up.
+- [x] ~~Native trainer SIGABRT~~ — **root-caused via the M3 field test**: NaN
+      seed points (`assertion failed: !x.is_nan()`), now filtered out (see M3).
+      The force-kill teardown case is separately avoidable via graceful Cancel.
+- [ ] Belt-and-suspenders: `panic=unwind` + `catch_unwind` in brush-ffi so ANY
+      future native panic surfaces as the error screen, not a process abort.
 
 ### M5 — Perf, memory, thermals 🔨 (in progress)
 - [x] Iteration study (on Pixel 6 Mali, seeded scan99_colmap): PSNR 21.5 / 24.8 /
