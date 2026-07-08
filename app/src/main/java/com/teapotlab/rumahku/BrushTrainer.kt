@@ -99,6 +99,25 @@ object BrushTrainer {
     ): IntArray?
 
     /**
+     * Render the CURRENT training splats from a look camera (M2 "refine live"),
+     * or null if no training is active / no splats produced yet. Same camera
+     * params as [nativeRenderLook] but reads the live in-training splats.
+     */
+    external fun nativeRenderTrainingPreview(
+        transform: FloatArray,
+        yawDeg: Float,
+        pitchDeg: Float,
+        fovScale: Float,
+        flX: Float,
+        flY: Float,
+        imgW: Int,
+        imgH: Int,
+        outW: Int,
+        outH: Int,
+        levelGravity: Int,
+    ): IntArray?
+
+    /**
      * World-space forward direction [x,y,z] the camera looks after [yawDeg]/
      * [pitchDeg] at standpoint [transform]. Used to pick the standpoint to move
      * to on a directional double-tap. Cheap (no render).
