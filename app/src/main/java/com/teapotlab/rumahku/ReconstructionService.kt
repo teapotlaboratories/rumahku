@@ -46,6 +46,7 @@ class ReconstructionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val datasetDir = intent?.getStringExtra(EXTRA_DATASET)
+        val iters = intent?.getIntExtra(EXTRA_ITERS, TOTAL_ITERS) ?: TOTAL_ITERS
         if (datasetDir == null) {
             stopSelf()
             return START_NOT_STICKY
@@ -78,7 +79,7 @@ class ReconstructionService : Service() {
 
             val trained = try {
                 val outDir = File(datasetDir, "splat")
-                BrushTrainer.nativeTrain(datasetDir, outDir.absolutePath, TOTAL_ITERS, MAX_RES, MAX_FRAMES)
+                BrushTrainer.nativeTrain(datasetDir, outDir.absolutePath, iters, MAX_RES, MAX_FRAMES)
             } catch (t: Throwable) {
                 Log.e(TAG, "nativeTrain failed", t)
                 "ERROR: ${t.message}"
@@ -142,6 +143,7 @@ class ReconstructionService : Service() {
         private const val CHANNEL_ID = "reconstruction"
         private const val NOTIF_ID = 42
         private const val EXTRA_DATASET = "dataset_dir"
+        private const val EXTRA_ITERS = "iters"
 
         // Tuned from the on-device iteration study (docs: worklog 2026-07-07):
         // 2000 iters ≈ PSNR 24.8 (near the 25.9 off-device baseline) in ~7 min
@@ -167,10 +169,11 @@ class ReconstructionService : Service() {
         @Volatile
         private var cancelRequested = false
 
-        /** Start a reconstruction of [datasetDir] as a foreground service. */
-        fun start(context: Context, datasetDir: String) {
+        /** Start a reconstruction of [datasetDir] for [iters] iterations. */
+        fun start(context: Context, datasetDir: String, iters: Int = TOTAL_ITERS) {
             val intent = Intent(context, ReconstructionService::class.java)
                 .putExtra(EXTRA_DATASET, datasetDir)
+                .putExtra(EXTRA_ITERS, iters)
             ContextCompat.startForegroundService(context, intent)
         }
 
