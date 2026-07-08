@@ -24,7 +24,12 @@ splat on the device, semi-real-time. See `PHASE2.md`.
 - [x] Build Brush (`brush-cli`) for `aarch64-android` (cargo-ndk, NDK 27)
 - [x] Prove wgpu→Vulkan compute runs on Pixel 6 **Mali-G78**
 - [x] Train a splat on-device (5.5 it/s, 311 MB, 32 °C) → valid `.ply`
-- [ ] ⬜ Repeat on **S25 (Adreno)** — the other M0 target
+- [ ] 🔨 **S25 (Adreno)** — the other M0 target (see `S25.md`). On a Samsung Tab
+      S8 (Adreno 730) proxy: install, ARCore, depth, and GL **coverage-overlay
+      rendering all work on Adreno**; wgpu/cubecl **training compute unverified** —
+      blocked by that Tab's pathological external-storage `EACCES` (device-specific,
+      not the S25). Added a storage→internal fallback (`Storage.kt`). Needs the
+      real S25 to finish.
 
 ### M1 — Integrate the training core into the app ✅ (done — PR #2)
 - [x] `brush-ffi` cdylib (JNI shim over Brush), standard `jni 0.21`
