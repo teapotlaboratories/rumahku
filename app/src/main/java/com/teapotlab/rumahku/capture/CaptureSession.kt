@@ -210,6 +210,12 @@ class CaptureSession(
                     worldToCam, intr.focalLength[0], intr.focalLength[1],
                     intr.principalPoint[0], intr.principalPoint[1], nv21, width, height,
                 )
+                // Same for the dense depth-coverage points → the live overlay
+                // becomes a colour point cloud of the room ("rough preview").
+                coverageBuffer.colorFrom(
+                    worldToCam, intr.focalLength[0], intr.focalLength[1],
+                    intr.principalPoint[0], intr.principalPoint[1], nv21, width, height,
+                )
             }
             emit()
         } catch (e: Exception) {
