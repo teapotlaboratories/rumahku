@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -50,8 +51,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,6 +77,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.teapotlab.rumahku.ar.ArAvailability
 import com.teapotlab.rumahku.ar.ArStatus
 import com.teapotlab.rumahku.ui.theme.RumahkuTheme
+import kotlinx.coroutines.delay
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -113,6 +117,17 @@ private fun HomeScreen() {
     var manageScan by remember { mutableStateOf<Scan?>(null) }
     var renameTarget by remember { mutableStateOf<Scan?>(null) }
     var deleteTarget by remember { mutableStateOf<Scan?>(null) }
+
+    // Live build progress for the scan currently reconstructing (shown on its card).
+    val currentDir by ReconstructionService.currentDir.collectAsState()
+    var buildPct by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(reconstructing) {
+        while (reconstructing) {
+            buildPct = (BrushTrainer.nativeCurrentIter().toFloat() /
+                ReconstructionService.TOTAL_ITERS).coerceIn(0f, 1f)
+            delay(500)
+        }
+    }
 
     var hasCamera by remember {
         mutableStateOf(
@@ -163,15 +178,13 @@ private fun HomeScreen() {
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            if (reconstructing) {
-                item(span = { GridItemSpan(maxLineSpan) }) { Banner("Reconstructing a scan…  ") }
-            }
             if (scans.isEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) { EmptyState() }
             } else {
                 items(scans) { scan ->
                     ScanCard(
                         scan,
+                        progress = if (reconstructing && scan.dir.absolutePath == currentDir) buildPct else null,
                         onClick = { onScanClick(context, scan) },
                         onLongClick = { manageScan = scan },
                     )
@@ -242,10 +255,11 @@ private fun startCapture(context: Context) {
     context.startActivity(Intent(context, CaptureActivity::class.java))
 }
 
-/** Immersive scan card: photo fills the card, title over a gradient scrim. */
+/** Immersive scan card: photo fills the card, title over a gradient scrim.
+ *  When [progress] is non-null the scan is building — show a live ring. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ScanCard(scan: Scan, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun ScanCard(scan: Scan, progress: Float?, onClick: () -> Unit, onLongClick: () -> Unit) {
     val thumb = remember(scan.thumb?.path) { scan.thumb?.let { decodeThumb(it) } }
     Card(
         modifier = Modifier.fillMaxWidth()
@@ -257,18 +271,33 @@ private fun ScanCard(scan: Scan, onClick: () -> Unit, onLongClick: () -> Unit) {
             // Bottom scrim so white text stays legible over any photo.
             Box(Modifier.fillMaxSize().background(
                 Brush.verticalGradient(0.45f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.72f))))
-            StatusDotChip(scan.status, Modifier.align(Alignment.TopStart).padding(10.dp))
-            // ▶ over photos only — the placeholder already shows a house glyph.
-            if (scan.status == ScanStatus.READY && thumb != null) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = null,
-                    tint = Color.White.copy(alpha = 0.92f),
-                    modifier = Modifier.align(Alignment.Center).size(46.dp))
+            if (progress != null) {
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
+                    contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.size(56.dp),
+                        color = Color.White,
+                        trackColor = Color.White.copy(alpha = 0.3f),
+                    )
+                }
+            } else {
+                StatusDotChip(scan.status, Modifier.align(Alignment.TopStart).padding(10.dp))
+                // ▶ over photos only — the placeholder already shows a house glyph.
+                if (scan.status == ScanStatus.READY && thumb != null) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.92f),
+                        modifier = Modifier.align(Alignment.Center).size(46.dp))
+                }
             }
             Column(Modifier.align(Alignment.BottomStart).padding(14.dp)) {
                 Text(scan.title, color = Color.White,
                     style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                Text(secondaryLabel(scan.status), color = Color.White.copy(alpha = 0.8f),
-                    style = MaterialTheme.typography.labelSmall)
+                Text(
+                    if (progress != null) "Building ${(progress * 100).toInt()}%" else secondaryLabel(scan.status),
+                    color = Color.White.copy(alpha = 0.85f),
+                    style = MaterialTheme.typography.labelSmall,
+                )
             }
         }
     }
@@ -316,16 +345,6 @@ private fun StatusDotChip(status: ScanStatus, modifier: Modifier) {
 private fun secondaryLabel(status: ScanStatus): String = when (status) {
     ScanStatus.READY -> "Tap to walk through"
     ScanStatus.CAPTURED -> "Tap to build 3D"
-}
-
-@Composable
-private fun Banner(text: String) {
-    Text(text, color = MaterialTheme.colorScheme.onSecondaryContainer,
-        style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
-        modifier = Modifier.fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.secondaryContainer)
-            .padding(14.dp))
 }
 
 @Composable

@@ -50,11 +50,17 @@ class ReconstructionService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (_running.value) {
+            // Already building (e.g. the user tapped the building card) — don't
+            // start a second training thread; the UI just re-observes progress.
+            return START_NOT_STICKY
+        }
 
         startForeground(NOTIF_ID, notification("Starting…", ongoing = true))
         acquireWakeLock()
         _result.value = null
         cancelRequested = false
+        _currentDir.value = datasetDir
         _running.value = true
 
         thread(name = "brush-reconstruct") {
@@ -80,6 +86,7 @@ class ReconstructionService : Service() {
             val out = if (cancelRequested) CANCELLED else trained
 
             _running.value = false
+            _currentDir.value = null
             progress.interrupt()
             _result.value = out
             notify(
@@ -148,6 +155,11 @@ class ReconstructionService : Service() {
 
         private val _result = MutableStateFlow<String?>(null)
         val result: StateFlow<String?> = _result
+
+        /** Absolute path of the scan currently being built (null when idle) —
+         *  lets the home show progress on that specific card. */
+        private val _currentDir = MutableStateFlow<String?>(null)
+        val currentDir: StateFlow<String?> = _currentDir
 
         /** Sentinel result when the user cancels a build. */
         const val CANCELLED = "CANCELLED"
