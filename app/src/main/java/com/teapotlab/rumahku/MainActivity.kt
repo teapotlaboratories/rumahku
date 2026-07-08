@@ -371,7 +371,7 @@ private fun EmptyState() {
 
 // ── data ──────────────────────────────────────────────────────────────────
 private fun loadScans(context: Context): List<Scan> {
-    val root = context.getExternalFilesDir(null) ?: context.filesDir
+    val root = rumahkuRoot(context)
     val dirs = File(root, "captures").listFiles()
         ?.filter { it.isDirectory && File(it, "transforms.json").exists() }
         ?.sortedByDescending { it.lastModified() } ?: emptyList()
