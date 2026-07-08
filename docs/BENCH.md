@@ -44,6 +44,15 @@ Mesh: all machines are on a **NetBird** WireGuard mesh under the
   `libnvidia-ml.so.1`. The symlink lives in the distrobox fs, so re-run the
   `ln -sf` if the distrobox is ever recreated (`distrobox enter` on the host).
   CUDA `nvcc` is not on `PATH` (training uses the nerfstudio/gsplat env's toolkit).
+- **Autostart:** NetBird runs *inside* the `carbonite-noble` distrobox, so if
+  that container is down the whole box drops off the mesh. A systemd **user**
+  service on the host keeps it up across reboots:
+  `~/.config/systemd/user/carbonite-noble.service` (`distrobox enter
+  carbonite-noble -- true`), enabled for `default.target`, with
+  `loginctl enable-linger deck` so it starts at boot without a login. If the box
+  is unreachable on the mesh, the host is `carbonite` at LAN `10.0.0.72`
+  (**do not touch without explicit OK**); check `podman ps -a` / `distrobox list`
+  and `systemctl --user status carbonite-noble.service`.
 - Connect (login user is **`deck`**):
   ```bash
   ssh -i ~/.ssh/rumahku_splat deck@carbonite-noble.kugelblitz.internal
