@@ -40,7 +40,7 @@ import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.UnavailableException
 import com.teapotlab.rumahku.ar.ArRenderer
-import com.teapotlab.rumahku.ar.CoverageBuffer
+import com.teapotlab.rumahku.ar.TsdfVolume
 import com.teapotlab.rumahku.ar.DisplayRotationHelper
 import com.teapotlab.rumahku.capture.CaptureProgress
 import com.teapotlab.rumahku.capture.CaptureSession
@@ -62,8 +62,8 @@ class CaptureActivity : ComponentActivity() {
     private lateinit var displayRotationHelper: DisplayRotationHelper
     private lateinit var captureSession: CaptureSession
 
-    // Shared world-space coverage dots: written during capture, drawn each frame.
-    private val coverageBuffer = CoverageBuffer()
+    // Shared live surface: depth fused into a TSDF volume + marching cubes.
+    private val tsdf = TsdfVolume()
 
     // Compose observes these; the GL thread updates them (via runOnUiThread).
     private var status by mutableStateOf(CaptureStatus())
@@ -75,7 +75,7 @@ class CaptureActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         displayRotationHelper = DisplayRotationHelper(this)
-        captureSession = CaptureSession(this, coverageBuffer) { p ->
+        captureSession = CaptureSession(this, tsdf) { p ->
             runOnUiThread { progress = p }
         }
 
@@ -87,7 +87,7 @@ class CaptureActivity : ComponentActivity() {
                 ArRenderer(
                     sessionProvider = { session },
                     displayRotationHelper = displayRotationHelper,
-                    coverageBuffer = coverageBuffer,
+                    tsdf = tsdf,
                     onFrame = ::onFrame,
                 )
             )
@@ -124,9 +124,9 @@ class CaptureActivity : ComponentActivity() {
         runOnUiThread { if (newStatus != status) status = newStatus }
         captureSession.onFrame(frame)
 
-        // Live coverage readout (throttled) — grows as depth fills in surfaces.
+        // Live mesh readout (throttled) — grows as depth fuses into the surface.
         if (++frameTick % 6 == 0) {
-            val c = coverageBuffer.count()
+            val c = tsdf.triangleCount()
             if (c != coveragePoints) runOnUiThread { coveragePoints = c }
         }
     }
@@ -216,7 +216,7 @@ class CaptureActivity : ComponentActivity() {
             focusMode = Config.FocusMode.AUTO
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             // Depth-from-motion powers the Polycam-style coverage overlay
-            // (DepthCoverage). Degrade gracefully where it isn't supported.
+            // (TsdfVolume). Degrade gracefully where it isn't supported.
             depthMode = if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
                 Config.DepthMode.AUTOMATIC
             } else {
@@ -281,9 +281,9 @@ private fun CaptureControls(
                         .background(Color(0x88000000), RoundedCornerShape(20.dp))
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                 )
-                // Live coverage — grows as the teal surface fills in.
+                // Live mesh — grows as the surface reconstructs.
                 Text(
-                    text = "coverage · %,d pts".format(coveragePoints),
+                    text = "mesh · %,d faces".format(coveragePoints),
                     color = Color(0xFF34E0C0),
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier

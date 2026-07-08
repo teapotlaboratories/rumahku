@@ -8,7 +8,7 @@ import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.teapotlab.rumahku.ar.gl.BackgroundRenderer
-import com.teapotlab.rumahku.ar.gl.CoverageRenderer
+import com.teapotlab.rumahku.ar.gl.DepthMeshRenderer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -27,12 +27,12 @@ import javax.microedition.khronos.opengles.GL10
 class ArRenderer(
     private val sessionProvider: () -> Session?,
     private val displayRotationHelper: DisplayRotationHelper,
-    private val coverageBuffer: CoverageBuffer,
+    private val tsdf: TsdfVolume,
     private val onFrame: (Frame) -> Unit,
 ) : GLSurfaceView.Renderer {
 
     private val backgroundRenderer = BackgroundRenderer()
-    private val coverageRenderer = CoverageRenderer()
+    private val depthMeshRenderer = DepthMeshRenderer()
 
     // Scratch matrices reused each frame to avoid per-frame allocation.
     private val projMatrix = FloatArray(16)
@@ -42,7 +42,7 @@ class ArRenderer(
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         backgroundRenderer.createOnGlThread()
-        coverageRenderer.createOnGlThread()
+        depthMeshRenderer.createOnGlThread()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -67,17 +67,19 @@ class ArRenderer(
 
             // Hand the frame to the listener (status overlay + keyframe capture).
             // Runs on the GL thread — the only place the Frame is valid. Capture
-            // may append a coverage point here, which we then draw below.
+            // may triangulate depth into the mesh here, which we then draw below.
             onFrame(frame)
 
-            // Draw the coverage dots anchored in world space. Only meaningful
+            // Draw the live depth mesh anchored in world space. Only meaningful
             // while tracking, when the camera matrices are valid.
             val camera = frame.camera
             if (camera.trackingState == TrackingState.TRACKING) {
                 camera.getProjectionMatrix(projMatrix, 0, Z_NEAR, Z_FAR)
                 camera.getViewMatrix(viewMatrix, 0)
                 Matrix.multiplyMM(viewProjMatrix, 0, projMatrix, 0, viewMatrix, 0)
-                coverageRenderer.draw(viewProjMatrix, coverageBuffer.snapshot())
+                // Fresh depth buffer so the mesh self-occludes over the camera bg.
+                GLES20.glClear(GLES20.GL_DEPTH_BUFFER_BIT)
+                depthMeshRenderer.draw(viewProjMatrix, tsdf.snapshot())
             }
         } catch (t: Throwable) {
             // A dropped frame should never crash the render loop.
