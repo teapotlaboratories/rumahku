@@ -16,10 +16,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -109,8 +116,73 @@ private fun DiagnosticsScreen() {
             ) {
                 Text("Start scanning")
             }
+
+            ReconstructSection()
         }
     }
+}
+
+/**
+ * Phase 2 (M1) — on-device reconstruction. Finds the latest captured scan and
+ * trains a Gaussian splat from it via [BrushTrainer] (Brush on the phone GPU),
+ * showing live progress. Training is GPU-heavy and runs off the main thread.
+ */
+@Composable
+private fun ReconstructSection() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var running by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var result by remember { mutableStateOf<String?>(null) }
+
+    // Poll native progress while a training run is in flight.
+    LaunchedEffect(running) {
+        while (running) {
+            status = "training… iter ${BrushTrainer.nativeCurrentIter()}, " +
+                "${BrushTrainer.nativeCurrentSplats()} splats"
+            delay(400)
+        }
+    }
+
+    val latest = remember(running) { latestCaptureDir(context) }
+
+    Button(
+        enabled = !running && latest != null,
+        onClick = {
+            val dataset = latest ?: return@Button
+            running = true
+            result = null
+            status = "starting…"
+            scope.launch {
+                val out = withContext(Dispatchers.Default) {
+                    BrushTrainer.nativeInit(context.cacheDir.absolutePath)
+                    val outDir = File(dataset, "splat")
+                    // Conservative first-pass caps (memory/thermals); tune later.
+                    BrushTrainer.nativeTrain(
+                        dataset.absolutePath, outDir.absolutePath,
+                        /* totalIters = */ 500, /* maxRes = */ 720, /* maxFrames = */ 40,
+                    )
+                }
+                running = false
+                result = out
+                status = if (out.startsWith("ERROR")) out else "done → $out"
+            }
+        },
+    ) {
+        Text(if (latest == null) "Reconstruct (no scan yet)" else "Reconstruct latest scan")
+    }
+
+    status?.let { StatusLine("Reconstruction", it) }
+    result?.takeIf { !it.startsWith("ERROR") }?.let { StatusLine("Splat", it.substringAfterLast('/')) }
+}
+
+/** Most-recent capture dir that has a transforms.json, or null. */
+private fun latestCaptureDir(context: android.content.Context): File? {
+    val root = context.getExternalFilesDir(null) ?: context.filesDir
+    return File(root, "captures").listFiles()
+        ?.filter { it.isDirectory && File(it, "transforms.json").exists() }
+        ?.maxByOrNull { it.lastModified() }
 }
 
 @Composable

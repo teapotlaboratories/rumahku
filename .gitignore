@@ -22,3 +22,6 @@ local.properties
 # Never commit device secrets
 pixel-pin
 *.pin
+
+# build logs
+gradle_build.log
