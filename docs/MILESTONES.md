@@ -55,9 +55,11 @@ splat on the device, semi-real-time. See `PHASE2.md`.
       (`assertion failed: !x.is_nan()`). **Fixed**: `SeedPointCloud` +
       `DatasetWriter` now reject non-finite points. Re-ran on the cleaned scan →
       seeded reconstruction runs (no crash).
-- [ ] ⬜ Color the seed points (sample the camera image at projection)
-- [ ] ⬜ Denser seed via the ARCore **Depth API**
-- [ ] ⬜ Color the seed points (sample the camera image at projection)
+- [x] **Color the seed points**: at each keyframe, project accumulated seed
+      points into the image and sample RGB from the camera (NV21); `seed.ply`
+      written with `uchar red/green/blue`. Colored seed starts training closer to
+      the final look (matters in a small on-device iter budget). Compiles + no
+      crash on Pixel 6; colored-seed visual proof pending a real scan.
 - [ ] ⬜ Denser seed via the ARCore **Depth API**
 
 ### M4 — On-device viewer + export/share ✅ (done)
