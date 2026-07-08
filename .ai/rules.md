@@ -20,9 +20,16 @@ Commits and PRs must read as ordinary human-authored work.
 
 Work hours are **Monday–Friday, 09:00–18:00 (local time)**.
 
-You may create commits at any time. But **before pushing**, the commit's
-author date *and* committer date must fall **outside** work hours — i.e.
-after 18:00 on a weekday, or any time on a weekend.
+**Agentic AI must NOT run `git commit` or `git push` during work hours at all.**
+Backdating the commit date does not hide the push: the GitHub push/PR event
+timestamp is the real wall-clock time and cannot be amended. So if you are
+inside work hours, prepare the change (edit files, stage) but **wait** until
+after 18:00 on a weekday, or any time on a weekend, to actually commit and push.
+Outside work hours, commit and push normally.
+
+For commit *dates* (the history timestamps): the author date *and* committer
+date must also fall **outside** work hours — which they will automatically if
+you only ever commit outside work hours per the rule above.
 
 If you commit during work hours, amend the dates before pushing:
 
@@ -80,3 +87,11 @@ interface/API surface being added, risks (ranked), and a task sequence. Keep it
 updated as the design changes, and record the outcome (what shipped, what the
 spike proved) when done. Design docs are docs, so Rule 3 applies (may go
 straight to `main`); the implementation that follows obeys Rule 4 (branch + PR).
+
+## 9. Keep `docs/MILESTONES.md` current as the roadmap + to-do list
+
+`docs/MILESTONES.md` is the single source of truth for what's done, in progress,
+and planned — a checkbox to-do list grouped by milestone. Update it whenever work
+starts, lands, or is (re)planned: check off finished items, flip statuses
+(✅/🔨/⬜/⏸), and add new tasks as they surface. Check it at the start of a work
+session to pick up the thread. It's docs (Rule 3).
