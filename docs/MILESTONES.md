@@ -40,12 +40,16 @@ splat on the device, semi-real-time. See `PHASE2.md`.
 - [x] **Foreground service + wakelock** — survives backgrounding/screen-lock
 - [ ] ⬜ Migrate the 44 MB `.so` to Git LFS or a CI build step
 
-### M2 — Semi-real-time / incremental training 🔨 (design; see `M2.md`)
-- [x] Design doc + architecture (`docs/M2.md`): streaming trainer in brush-ffi
-      (`nativeStreamStart/Push/RenderPreview/Finish`) + live preview during capture.
-- [ ] FFI spike: stream views into a long-lived trainer + render current splats
-- [ ] App: streaming service, push keyframes during capture, `.ply` on finish
-- [ ] UI: live preview overlay + contention/thermal throttling
+### M2 — Semi-real-time / incremental training 🔨 (refine-live shipped; see `M2.md`)
+- [x] Design doc + architecture (`docs/M2.md`).
+- [x] **"Refine live" slice (shipped + verified)**: FFI exposes the live training
+      splats via `TRAIN_SPLAT_VIEW` (the `Slot<Splats>` from `create_process`) +
+      `nativeRenderTrainingPreview`; the reconstruction screen renders them every
+      ~1.5 s so you **watch the splat converge** during the build. Concurrent
+      train + preview render on the shared Mali GPU ran to completion with no
+      crash (the key risk) — verified on Pixel 6.
+- [ ] Full **during-capture** streaming (long-lived manual trainer feeding
+      in-memory `SceneBatch`es as you scan; plan in `M2.md`) — the bigger build.
 
 ### M3 — On-device seeding (the quality lever) ✅ (validated + field-tested)
 - [x] Validate the lever on-device: **+10.8 dB** seeded vs random (see `M3.md`)
