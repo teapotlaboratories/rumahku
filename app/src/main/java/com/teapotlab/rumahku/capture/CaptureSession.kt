@@ -8,7 +8,7 @@ import com.google.ar.core.Pose
 import com.google.ar.core.PointCloud
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
-import com.teapotlab.rumahku.ar.CoverageBuffer
+import com.teapotlab.rumahku.ar.TsdfVolume
 import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -38,7 +38,7 @@ data class CaptureProgress(
  */
 class CaptureSession(
     private val context: Context,
-    private val coverageBuffer: CoverageBuffer,
+    private val tsdf: TsdfVolume,
     private val onProgress: (CaptureProgress) -> Unit,
 ) {
 
@@ -80,7 +80,7 @@ class CaptureSession(
         intrinsics = null
         stableTrackingFrames = 0
         prevFramePose = null
-        coverageBuffer.clear()
+        tsdf.clear()
         seedPointCloud.clear()
         capturing = true
         Log.i(TAG, "capture started → ${dir.absolutePath}")
@@ -144,17 +144,6 @@ class CaptureSession(
             Log.w(TAG, "seed point-cloud accumulate failed", e)
         }
 
-        // Polycam-style live coverage: accumulate dense Depth-API samples into
-        // the world coverage map (throttled). Fills in scanned surfaces so the
-        // gaps you haven't covered stay obvious. No-op if depth is unsupported.
-        if (++depthFrame % DEPTH_EVERY_N == 0) {
-            try {
-                DepthCoverage.accumulate(frame, coverageBuffer, DEPTH_STRIDE)
-            } catch (e: Exception) {
-                Log.w(TAG, "depth coverage accumulate failed", e)
-            }
-        }
-
         val last = lastKeyframePose
         if (last != null) {
             val moved = translationBetween(last, pose)
@@ -192,11 +181,6 @@ class CaptureSession(
             lastKeyframePose = pose
             val index = keyframeCount++
 
-            // Drop a coverage marker in world space, projected in front of the
-            // camera so it lands roughly on the surface being scanned.
-            val fwd = pose.transformPoint(floatArrayOf(0f, 0f, -COVERAGE_DISTANCE_M))
-            coverageBuffer.add(fwd[0], fwd[1], fwd[2])
-
             val w = writer
             executor?.execute { w?.writeKeyframe(index, nv21, width, height, matrix) }
 
@@ -210,12 +194,14 @@ class CaptureSession(
                     worldToCam, intr.focalLength[0], intr.focalLength[1],
                     intr.principalPoint[0], intr.principalPoint[1], nv21, width, height,
                 )
-                // Same for the dense depth-coverage points → the live overlay
-                // becomes a colour point cloud of the room ("rough preview").
-                coverageBuffer.colorFrom(
-                    worldToCam, intr.focalLength[0], intr.focalLength[1],
-                    intr.principalPoint[0], intr.principalPoint[1], nv21, width, height,
-                )
+            }
+            // Fuse this keyframe's depth into the TSDF volume + incrementally
+            // re-mesh via marching cubes (vertices coloured from nv21, same view).
+            // The live "watch it reconstruct" surface; real splat is post-capture.
+            try {
+                tsdf.integrate(frame, nv21, width, height, DEPTH_STRIDE)
+            } catch (e: Exception) {
+                Log.w(TAG, "tsdf integrate failed", e)
             }
             emit()
         } catch (e: Exception) {
@@ -248,12 +234,11 @@ class CaptureSession(
         private const val TAG = "rumahku-capture-session"
         private const val MIN_TRANSLATION_M = 0.10f          // 10 cm
         private val MIN_ROTATION_RAD = Math.toRadians(12.0).toFloat()
-        private const val COVERAGE_DISTANCE_M = 1.5f         // dot projected this far ahead
         private const val TRACKING_WARMUP_FRAMES = 30        // ~1 s of stable tracking before capturing
         private const val MAX_FRAME_JUMP_M = 0.30f           // single-frame move above this = tracking glitch
         private const val MIN_POINT_CONFIDENCE = 0.3f        // drop low-confidence ARCore feature points from the seed
         private const val DEPTH_EVERY_N = 2                  // sample the depth map every Nth stable frame
-        private const val DEPTH_STRIDE = 2                   // subsample the depth grid (every 2nd pixel)
+        private const val DEPTH_STRIDE = 2                   // depth subsample fed into TSDF fusion
         // Sharpness gate — capture only when moving slower than this (blur guard).
         private const val MAX_STILL_LIN_VEL = 0.12f          // m/s
         private val MAX_STILL_ANG_VEL = Math.toRadians(18.0).toFloat()  // rad/s
