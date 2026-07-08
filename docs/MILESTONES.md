@@ -75,6 +75,19 @@ splat on the device, semi-real-time. See `PHASE2.md`.
 - Note: `scan99` is a front-facing scan (not 360°), so looking far to the side
   shows uncaptured/black regions — a coverage limit of that scan, not the viewer.
 
+### Reconstruction — cancel ✅ (done)
+- [x] **Cancel a running build**: `ReconstructionService.cancel()` → the FFI's
+      cooperative `nativeCancel` (loop checks a CANCEL flag) → clean return →
+      result `CANCELLED` → back home; no partial/corrupt splat. Cancel button on
+      the progress screen. Verified on Pixel 6 (graceful, **no SIGABRT**). This
+      also removes the need to force-kill mid-build (the likely abort trigger).
+
+### Known issues
+- [ ] ⚠️ Native trainer **SIGABRT** seen once when a build was **force-killed**
+      mid-GPU-op (thread `brush-reconstru`, panic=abort). Now largely avoidable
+      via graceful Cancel; not reproducible in normal use. A belt-and-suspenders
+      fix (panic=unwind + catch_unwind in brush-ffi) remains a follow-up.
+
 ### M5 — Perf, memory, thermals 🔨 (in progress)
 - [x] Iteration study (on Pixel 6 Mali, seeded scan99_colmap): PSNR 21.5 / 24.8 /
       25.3 at 1k / 2k / 3k iters; 3000 iters in 755 s at 24→28 °C (no throttling).
@@ -99,8 +112,10 @@ splat on the device, semi-real-time. See `PHASE2.md`.
       circles instead of 🎉/😕) and the **viewer** (frosted circular share/recenter
       icon buttons instead of text pills). Viewer + running state verified on
       Pixel 6; success/error badges compile (trivial icon-in-circle).
+- [x] **Rename / delete scans** (long-press card → manage dialog; rename persists
+      to `name.txt`, delete has a confirm). Verified on Pixel 6.
 - [ ] Per-scan reconstruction progress on the card (vs global banner)
-- [ ] Rename/delete scans; scan detail sheet
+- [ ] Scan detail sheet
 ### Reconstruction progress screen ✅ (done)
 - [x] `ReconstructionActivity` — tap a "Tap to build" card → starts the service,
       shows a circular % ring, live splat count + elapsed, friendly messages;
