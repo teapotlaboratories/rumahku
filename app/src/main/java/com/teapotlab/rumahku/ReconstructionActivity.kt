@@ -60,17 +60,19 @@ class ReconstructionActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val datasetDir = intent.getStringExtra(EXTRA_DATASET)
+        val iters = intent.getIntExtra(EXTRA_ITERS, ReconstructionService.TOTAL_ITERS)
         if (datasetDir == null) { finish(); return }
-        setContent { RumahkuTheme { ReconstructionScreen(datasetDir) { finish() } } }
+        setContent { RumahkuTheme { ReconstructionScreen(datasetDir, iters) { finish() } } }
     }
 
     companion object {
         const val EXTRA_DATASET = "dataset_dir"
+        const val EXTRA_ITERS = "iters"
     }
 }
 
 @Composable
-private fun ReconstructionScreen(datasetDir: String, onClose: () -> Unit) {
+private fun ReconstructionScreen(datasetDir: String, iters: Int, onClose: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val running by ReconstructionService.running.collectAsState()
     val result by ReconstructionService.result.collectAsState()
@@ -95,7 +97,7 @@ private fun ReconstructionScreen(datasetDir: String, onClose: () -> Unit) {
             ) {
                 requestNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
-            ReconstructionService.start(context, datasetDir)
+            ReconstructionService.start(context, datasetDir, iters)
         }
     }
 
@@ -159,7 +161,7 @@ private fun ReconstructionScreen(datasetDir: String, onClose: () -> Unit) {
                     }
                 }
                 else -> {
-                    val pct = (iter.toFloat() / ReconstructionService.TOTAL_ITERS).coerceIn(0f, 1f)
+                    val pct = (iter.toFloat() / iters).coerceIn(0f, 1f)
                     Text("Building your 3D scan", style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold)
                     Box(contentAlignment = Alignment.Center, modifier = Modifier.size(180.dp)) {

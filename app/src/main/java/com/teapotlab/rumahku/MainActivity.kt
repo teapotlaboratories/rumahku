@@ -117,6 +117,7 @@ private fun HomeScreen() {
     var manageScan by remember { mutableStateOf<Scan?>(null) }
     var renameTarget by remember { mutableStateOf<Scan?>(null) }
     var deleteTarget by remember { mutableStateOf<Scan?>(null) }
+    var buildScan by remember { mutableStateOf<Scan?>(null) }   // quality picker
 
     // Live build progress for the scan currently reconstructing (shown on its card).
     val currentDir by ReconstructionService.currentDir.collectAsState()
@@ -185,7 +186,10 @@ private fun HomeScreen() {
                     ScanCard(
                         scan,
                         progress = if (reconstructing && scan.dir.absolutePath == currentDir) buildPct else null,
-                        onClick = { onScanClick(context, scan) },
+                        onClick = {
+                            if (scan.status == ScanStatus.READY) openViewer(context, scan)
+                            else buildScan = scan
+                        },
                         onLongClick = { manageScan = scan },
                     )
                 }
@@ -239,16 +243,44 @@ private fun HomeScreen() {
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } },
         )
     }
+    buildScan?.let { s ->
+        AlertDialog(
+            onDismissRequest = { buildScan = null },
+            title = { Text("Build quality") },
+            text = {
+                Column {
+                    QualityOption("Quick", "1000 iters · fastest") { launchBuild(context, s, 1000); buildScan = null }
+                    QualityOption("Balanced", "2000 iters · recommended") { launchBuild(context, s, 2000); buildScan = null }
+                    QualityOption("High", "3000 iters · sharpest") { launchBuild(context, s, 3000); buildScan = null }
+                }
+            },
+            confirmButton = { TextButton(onClick = { buildScan = null }) { Text("Cancel") } },
+        )
+    }
 }
 
-private fun onScanClick(context: Context, scan: Scan) {
-    val target = when (scan.status) {
-        ScanStatus.READY -> Intent(context, SplatViewerActivity::class.java)
-            .putExtra(SplatViewerActivity.EXTRA_DATASET, scan.dir.absolutePath)
-        ScanStatus.CAPTURED -> Intent(context, ReconstructionActivity::class.java)
-            .putExtra(ReconstructionActivity.EXTRA_DATASET, scan.dir.absolutePath)
+@Composable
+private fun QualityOption(title: String, subtitle: String, onClick: () -> Unit) {
+    Column(Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 10.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(subtitle, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    context.startActivity(target)
+}
+
+private fun openViewer(context: Context, scan: Scan) {
+    context.startActivity(
+        Intent(context, SplatViewerActivity::class.java)
+            .putExtra(SplatViewerActivity.EXTRA_DATASET, scan.dir.absolutePath)
+    )
+}
+
+private fun launchBuild(context: Context, scan: Scan, iters: Int) {
+    context.startActivity(
+        Intent(context, ReconstructionActivity::class.java)
+            .putExtra(ReconstructionActivity.EXTRA_DATASET, scan.dir.absolutePath)
+            .putExtra(ReconstructionActivity.EXTRA_ITERS, iters)
+    )
 }
 
 private fun startCapture(context: Context) {
