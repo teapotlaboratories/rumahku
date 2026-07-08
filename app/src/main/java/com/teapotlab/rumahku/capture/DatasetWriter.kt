@@ -78,13 +78,18 @@ class DatasetWriter(private val sessionDir: File) {
      *  aborts the trainer, and the vertex count must match the lines written. */
     private fun writeSeedPly(points: List<FloatArray>) {
         val finite = points.filter { it[0].isFinite() && it[1].isFinite() && it[2].isFinite() }
-        val sb = StringBuilder(64 + finite.size * 24)
+        val sb = StringBuilder(64 + finite.size * 32)
         sb.append("ply\n").append("format ascii 1.0\n")
             .append("comment rumahku ARCore feature-point seed\n")
             .append("element vertex ").append(finite.size).append('\n')
             .append("property float x\nproperty float y\nproperty float z\n")
+            .append("property uchar red\nproperty uchar green\nproperty uchar blue\n")
             .append("end_header\n")
-        for (p in finite) sb.append(p[0]).append(' ').append(p[1]).append(' ').append(p[2]).append('\n')
+        for (p in finite) {
+            sb.append(p[0]).append(' ').append(p[1]).append(' ').append(p[2]).append(' ')
+                .append(p[3].toInt()).append(' ').append(p[4].toInt()).append(' ').append(p[5].toInt())
+                .append('\n')
+        }
         File(sessionDir, SEED_PLY_NAME).writeText(sb.toString())
     }
 

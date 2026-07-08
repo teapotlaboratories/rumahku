@@ -199,6 +199,18 @@ class CaptureSession(
 
             val w = writer
             executor?.execute { w?.writeKeyframe(index, nv21, width, height, matrix) }
+
+            // Colour the accumulated seed points that are visible in this
+            // keyframe (reuses the image we already have — no extra acquire).
+            val intr = intrinsics
+            if (intr != null) {
+                val worldToCam = FloatArray(16)
+                pose.inverse().toMatrix(worldToCam, 0)
+                seedPointCloud.colorFrom(
+                    worldToCam, intr.focalLength[0], intr.focalLength[1],
+                    intr.principalPoint[0], intr.principalPoint[1], nv21, width, height,
+                )
+            }
             emit()
         } catch (e: Exception) {
             Log.e(TAG, "keyframe capture failed", e)
