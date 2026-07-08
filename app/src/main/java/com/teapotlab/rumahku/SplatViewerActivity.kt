@@ -86,6 +86,7 @@ private class Scene(
     val w: Int,
     val h: Int,
     val frames: List<FloatArray>,
+    val gravityUp: Boolean,
 )
 
 private fun loadScene(datasetDir: String): Scene? {
@@ -110,7 +111,10 @@ private fun loadScene(datasetDir: String): Scene? {
         }
         frames.add(m)
     }
-    return Scene(ply.absolutePath, flX, flY, w, h, frames.ifEmpty { return null })
+    // ARCore captures are gravity-aligned (+Y up) so the walkthrough can be
+    // leveled; imported datasets (COLMAP) have an arbitrary up, so don't.
+    val gravityUp = json.optBoolean("gravity_up", false)
+    return Scene(ply.absolutePath, flX, flY, w, h, frames.ifEmpty { return null }, gravityUp)
 }
 
 /** World position of a capture standpoint (translation of its c2w matrix). */
@@ -185,6 +189,7 @@ private fun WalkthroughScreen(datasetDir: String?) {
                 BrushTrainer.nativeRenderLook(
                     scene.plyPath, scene.frames[sp], yaw, pitch, fov,
                     scene.flX, scene.flY, scene.w, scene.h, outW, outH,
+                    if (scene.gravityUp) 1 else 0,
                 )
             }
             bmp = px?.let { Bitmap.createBitmap(it, outW, outH, Bitmap.Config.ARGB_8888) }

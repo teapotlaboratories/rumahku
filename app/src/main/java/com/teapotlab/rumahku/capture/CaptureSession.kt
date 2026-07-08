@@ -62,6 +62,7 @@ class CaptureSession(
     // reject implausible single-frame jumps.
     private var stableTrackingFrames = 0
     private var prevFramePose: Pose? = null
+    private var prevFrameTimeNanos: Long = 0L
     private var depthFrame = 0
 
     fun isCapturing(): Boolean = capturing
@@ -112,11 +113,14 @@ class CaptureSession(
         }
 
         val pose = camera.pose
+        val nowNanos = frame.timestamp
 
         // Reject implausible single-frame jumps — a real hand can't move this
         // fast; it means tracking glitched. Treat as instability.
         val prev = prevFramePose
+        val prevTs = prevFrameTimeNanos
         prevFramePose = pose
+        prevFrameTimeNanos = nowNanos
         if (prev != null && translationBetween(prev, pose) > MAX_FRAME_JUMP_M) {
             stableTrackingFrames = 0
             return
@@ -156,6 +160,16 @@ class CaptureSession(
             val moved = translationBetween(last, pose)
             val turned = rotationRadiansBetween(last, pose)
             if (moved < MIN_TRANSLATION_M && turned < MIN_ROTATION_RAD) return
+        }
+
+        // Sharpness gate: only capture when the phone is nearly still. Fast
+        // motion = motion blur, which wrecks the reconstruction. Effectively asks
+        // the user to pause briefly at each viewpoint.
+        if (prev != null && prevTs > 0L && nowNanos > prevTs) {
+            val dt = (nowNanos - prevTs) / 1e9f
+            val linVel = translationBetween(prev, pose) / dt
+            val angVel = rotationRadiansBetween(prev, pose) / dt
+            if (linVel > MAX_STILL_LIN_VEL || angVel > MAX_STILL_ANG_VEL) return
         }
 
         val image = try {
@@ -222,5 +236,8 @@ class CaptureSession(
         private const val MIN_POINT_CONFIDENCE = 0.3f        // drop low-confidence ARCore feature points from the seed
         private const val DEPTH_EVERY_N = 2                  // sample the depth map every Nth stable frame
         private const val DEPTH_STRIDE = 2                   // subsample the depth grid (every 2nd pixel)
+        // Sharpness gate — capture only when moving slower than this (blur guard).
+        private const val MAX_STILL_LIN_VEL = 0.12f          // m/s
+        private val MAX_STILL_ANG_VEL = Math.toRadians(18.0).toFloat()  // rad/s
     }
 }
