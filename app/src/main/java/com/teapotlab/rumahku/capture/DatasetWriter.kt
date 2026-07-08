@@ -51,19 +51,45 @@ class DatasetWriter(private val sessionDir: File) {
         }
     }
 
-    /** Finalizes the session by writing transforms.json. */
-    fun finish(intrinsics: CameraIntrinsics?) {
+    /**
+     * Finalizes the session: writes transforms.json, and — if we gathered enough
+     * ARCore feature points — a seed.ply plus a `ply_file_path` reference so the
+     * on-device trainer seeds from it instead of random init (M3).
+     */
+    fun finish(intrinsics: CameraIntrinsics?, seedPoints: List<FloatArray> = emptyList()) {
         try {
-            val json = buildTransforms(intrinsics)
+            val hasSeed = seedPoints.size >= MIN_SEED_POINTS
+            if (hasSeed) writeSeedPly(seedPoints)
+            val json = buildTransforms(intrinsics, if (hasSeed) SEED_PLY_NAME else null)
             File(sessionDir, "transforms.json").writeText(json.toString(2))
-            Log.i(TAG, "wrote ${frames.size} frames to ${sessionDir.absolutePath}")
+            Log.i(
+                TAG,
+                "wrote ${frames.size} frames" +
+                    (if (hasSeed) ", ${seedPoints.size}-point seed" else " (no seed)") +
+                    " to ${sessionDir.absolutePath}",
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "failed to write transforms.json", e)
+            Log.e(TAG, "failed to write dataset", e)
         }
     }
 
-    private fun buildTransforms(intrinsics: CameraIntrinsics?): JSONObject {
+    /** Writes accumulated world points as an ASCII point-cloud PLY (positions). */
+    private fun writeSeedPly(points: List<FloatArray>) {
+        val sb = StringBuilder(64 + points.size * 24)
+        sb.append("ply\n").append("format ascii 1.0\n")
+            .append("comment rumahku ARCore feature-point seed\n")
+            .append("element vertex ").append(points.size).append('\n')
+            .append("property float x\nproperty float y\nproperty float z\n")
+            .append("end_header\n")
+        for (p in points) sb.append(p[0]).append(' ').append(p[1]).append(' ').append(p[2]).append('\n')
+        File(sessionDir, SEED_PLY_NAME).writeText(sb.toString())
+    }
+
+    private fun buildTransforms(intrinsics: CameraIntrinsics?, plyFileName: String?): JSONObject {
         val root = JSONObject()
+        // Seed the trainer from the ARCore point cloud when we have one; Brush's
+        // nerfstudio loader reads this and skips random init.
+        if (plyFileName != null) root.put("ply_file_path", plyFileName)
 
         // Intrinsics come from ARCore's image (CPU) intrinsics, which match the
         // resolution of the frames we saved via acquireCameraImage().
@@ -114,5 +140,7 @@ class DatasetWriter(private val sessionDir: File) {
     companion object {
         private const val TAG = "rumahku-writer"
         private const val JPEG_QUALITY = 95
+        private const val SEED_PLY_NAME = "seed.ply"
+        private const val MIN_SEED_POINTS = 50   // below this the seed isn't worth it
     }
 }

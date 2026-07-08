@@ -9,15 +9,17 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
+import androidx.compose.ui.draw.clip
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -66,6 +68,8 @@ class CaptureActivity : ComponentActivity() {
     // Compose observes these; the GL thread updates them (via runOnUiThread).
     private var status by mutableStateOf(CaptureStatus())
     private var progress by mutableStateOf(CaptureProgress())
+    private var coveragePoints by mutableStateOf(0)
+    private var frameTick = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -97,9 +101,16 @@ class CaptureActivity : ComponentActivity() {
                 StatusOverlay(status)
                 CaptureControls(
                     progress = progress,
+                    tracking = status.tracking == TrackingState.TRACKING,
+                    coveragePoints = coveragePoints,
                     onToggle = {
-                        if (captureSession.isCapturing()) captureSession.stop()
-                        else captureSession.start()
+                        if (captureSession.isCapturing()) {
+                            captureSession.stop()
+                            Toast.makeText(this@CaptureActivity, "Scan saved", Toast.LENGTH_SHORT).show()
+                            finish() // back to home — the new scan appears there
+                        } else {
+                            captureSession.start()
+                        }
                     },
                 )
             }
@@ -112,6 +123,12 @@ class CaptureActivity : ComponentActivity() {
         val newStatus = CaptureStatus(camera.trackingState, camera.trackingFailureReason)
         runOnUiThread { if (newStatus != status) status = newStatus }
         captureSession.onFrame(frame)
+
+        // Live coverage readout (throttled) — grows as depth fills in surfaces.
+        if (++frameTick % 6 == 0) {
+            val c = coverageBuffer.count()
+            if (c != coveragePoints) runOnUiThread { coveragePoints = c }
+        }
     }
 
     override fun onResume() {
@@ -198,7 +215,14 @@ class CaptureActivity : ComponentActivity() {
         val config = Config(session).apply {
             focusMode = Config.FocusMode.AUTO
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-            depthMode = Config.DepthMode.DISABLED
+            // Depth-from-motion powers the Polycam-style coverage overlay
+            // (DepthCoverage). Degrade gracefully where it isn't supported.
+            depthMode = if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+                Config.DepthMode.AUTOMATIC
+            } else {
+                Log.w(TAG, "Depth API unsupported; coverage falls back to keyframe dots")
+                Config.DepthMode.DISABLED
+            }
         }
         session.configure(config)
     }
@@ -235,32 +259,62 @@ private fun StatusOverlay(status: CaptureStatus) {
 }
 
 @androidx.compose.runtime.Composable
-private fun CaptureControls(progress: CaptureProgress, onToggle: () -> Unit) {
+private fun CaptureControls(
+    progress: CaptureProgress,
+    tracking: Boolean,
+    coveragePoints: Int,
+    onToggle: () -> Unit,
+) {
+    val coral = Color(0xFFFF6B5E)
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 48.dp),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 44.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            if (progress.capturing) {
+                Text(
+                    text = "%d keyframes · %.1f m".format(progress.keyframes, progress.distanceMeters),
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .background(Color(0x88000000), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                // Live coverage — grows as the teal surface fills in.
+                Text(
+                    text = "coverage · %,d pts".format(coveragePoints),
+                    color = Color(0xFF34E0C0),
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .background(Color(0x88000000), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
+            // Camera-style record button: coral circle to start, coral square to finish.
+            Box(
+                modifier = Modifier
+                    .size(84.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.28f))
+                    .clickable { onToggle() },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (progress.capturing) {
+                    Box(Modifier.size(34.dp).clip(RoundedCornerShape(9.dp)).background(coral))
+                } else {
+                    Box(Modifier.size(66.dp).clip(CircleShape).background(coral))
+                }
+            }
             Text(
-                text = "%d keyframes · %.1f m".format(progress.keyframes, progress.distanceMeters),
+                text = when {
+                    progress.capturing -> "Tap to finish"
+                    tracking -> "Tap to start scanning"
+                    else -> "Point at the room to begin"
+                },
                 color = Color.White,
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier
-                    .background(Color(0xAA000000), RoundedCornerShape(20.dp))
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
             )
-            Button(
-                onClick = onToggle,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (progress.capturing) Color(0xFFD32F2F) else Color(0xFF00695C),
-                    contentColor = Color.White,
-                ),
-            ) {
-                Text(if (progress.capturing) "Stop" else "Start capture")
-            }
         }
     }
 }
