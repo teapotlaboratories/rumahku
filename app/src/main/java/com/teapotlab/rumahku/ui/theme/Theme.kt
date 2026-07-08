@@ -1,50 +1,36 @@
 package com.teapotlab.rumahku.ui.theme
 
-import android.app.Activity
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 
 /**
- * App theme. Uses Android 12+ "dynamic color" (wallpaper-derived palette) when
- * available — a nice touch on the S25 — and falls back to a fixed palette
- * otherwise. Kept intentionally small for Phase 1.
+ * rumahku brand theme — a bright, friendly consumer look (see docs/UX.md).
+ * A fixed light palette (dynamic/wallpaper color intentionally off, so the brand
+ * stays consistent): warm coral primary + teal secondary on a warm off-white.
+ * The fullscreen viewer paints its own black background — it stays immersive.
  */
-
-private val FallbackDark = darkColorScheme(
-    primary = Color(0xFF7FCFB6),
-    secondary = Color(0xFF9CC7FF),
-)
-
-private val FallbackLight = lightColorScheme(
-    primary = Color(0xFF00695C),
-    secondary = Color(0xFF2E5B9E),
+private val Brand = lightColorScheme(
+    primary = Color(0xFFFF6B5E),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFFFDAD3),
+    onPrimaryContainer = Color(0xFF5A1408),
+    secondary = Color(0xFF12B5A6),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFB4EFE8),
+    onSecondaryContainer = Color(0xFF00382F),
+    tertiary = Color(0xFFF4A340),
+    background = Color(0xFFFFF7F3),
+    onBackground = Color(0xFF2B2422),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF2B2422),
+    surfaceVariant = Color(0xFFF5E7E1),
+    onSurfaceVariant = Color(0xFF7A6A64),
+    outlineVariant = Color(0xFFEBDAD3),
 )
 
 @Composable
-fun RumahkuTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    content: @Composable () -> Unit,
-) {
-    val context = LocalContext.current
-    val colorScheme = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-            if (darkTheme) dynamicDarkColorScheme(context)
-            else dynamicLightColorScheme(context)
-
-        darkTheme -> FallbackDark
-        else -> FallbackLight
-    }
-
-    MaterialTheme(
-        colorScheme = colorScheme,
-        content = content,
-    )
+fun RumahkuTheme(content: @Composable () -> Unit) {
+    MaterialTheme(colorScheme = Brand, content = content)
 }

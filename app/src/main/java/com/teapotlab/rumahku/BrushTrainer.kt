@@ -42,4 +42,69 @@ object BrushTrainer {
     external fun nativeCurrentSplats(): Int
     external fun nativeIsRunning(): Int
     external fun nativeCancel()
+
+    /**
+     * Render one view of a splat [plyPath] from a camera pose ([transform] = the
+     * 16-float row-major nerfstudio `transform_matrix`), returning ARGB pixels
+     * (`outW*outH`) or null on failure. Blocking; run off the main thread.
+     */
+    external fun nativeRenderView(
+        plyPath: String,
+        transform: FloatArray,
+        flX: Float,
+        flY: Float,
+        imgW: Int,
+        imgH: Int,
+        outW: Int,
+        outH: Int,
+    ): IntArray?
+
+    /**
+     * Render an orbit view: the camera orbits the reconstruction's centroid,
+     * starting from a reference capture pose [refTransform], by [yawDeg] /
+     * [pitchDeg] with [distScale] zoom. ARGB pixels or null. Off the main thread.
+     */
+    external fun nativeRenderOrbit(
+        plyPath: String,
+        refTransform: FloatArray,
+        yawDeg: Float,
+        pitchDeg: Float,
+        distScale: Float,
+        flX: Float,
+        flY: Float,
+        imgW: Int,
+        imgH: Int,
+        outW: Int,
+        outH: Int,
+    ): IntArray?
+
+    /**
+     * Walkthrough "look-around" at a capture standpoint [transform]: the camera
+     * stays put while [yawDeg]/[pitchDeg] pan the view and [fovScale] zooms
+     * (< 1 = zoomed in). ARGB pixels or null. Off the main thread.
+     */
+    external fun nativeRenderLook(
+        plyPath: String,
+        transform: FloatArray,
+        yawDeg: Float,
+        pitchDeg: Float,
+        fovScale: Float,
+        flX: Float,
+        flY: Float,
+        imgW: Int,
+        imgH: Int,
+        outW: Int,
+        outH: Int,
+    ): IntArray?
+
+    /**
+     * World-space forward direction [x,y,z] the camera looks after [yawDeg]/
+     * [pitchDeg] at standpoint [transform]. Used to pick the standpoint to move
+     * to on a directional double-tap. Cheap (no render).
+     */
+    external fun nativeLookForward(
+        transform: FloatArray,
+        yawDeg: Float,
+        pitchDeg: Float,
+    ): FloatArray?
 }

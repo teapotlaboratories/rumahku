@@ -4,6 +4,13 @@
     <!-- Camera is the core sensor for scanning. ARCore drives it for us. -->
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- On-device reconstruction runs as a foreground service (multi-minute GPU
+         work) so it survives backgrounding / screen-lock. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- Declares the app uses the camera and (via ARCore) needs AR support.
          required=true means the Play Store will only offer the app to
          AR-capable devices. -->
@@ -41,6 +48,38 @@
             android:name=".CaptureActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:theme="@style/Theme.Rumahku.Dark" />
+
+        <!-- Reconstruction progress screen. -->
+        <activity
+            android:name=".ReconstructionActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.Rumahku" />
+
+        <!-- On-device splat viewer (M4) — immersive/dark theme. -->
+        <activity
+            android:name=".SplatViewerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.Rumahku.Dark" />
+
+        <!-- Lets us share the exported .ply to other apps via a content:// URI. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Runs BrushTrainer.nativeTrain in the foreground so a multi-minute
+             reconstruction isn't killed when the app is backgrounded. -->
+        <service
+            android:name=".ReconstructionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

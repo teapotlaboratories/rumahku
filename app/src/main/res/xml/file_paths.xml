@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Exposes captured scans + their exported .ply for sharing. Maps to
+         Context.getExternalFilesDir(null). -->
+    <external-files-path name="captures" path="captures/" />
+</paths>

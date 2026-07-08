@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Background fill for the adaptive launcher icon. -->
-    <color name="ic_launcher_background">#00695C</color>
+    <color name="ic_launcher_background">#FF6B5E</color>
+    <!-- Brand palette (mirrors ui/theme/Theme.kt). -->
+    <color name="brand_primary">#FF6B5E</color>
+    <color name="brand_bg">#FFF7F3</color>
 </resources>

@@ -5,6 +5,7 @@ import android.util.Log
 import com.google.ar.core.CameraIntrinsics
 import com.google.ar.core.Frame
 import com.google.ar.core.Pose
+import com.google.ar.core.PointCloud
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
 import com.teapotlab.rumahku.ar.CoverageBuffer
@@ -47,6 +48,9 @@ class CaptureSession(
     private var writer: DatasetWriter? = null
     private var executor: ExecutorService? = null
 
+    // Accumulated ARCore feature points → seed.ply for on-device training (M3).
+    private val seedPointCloud = SeedPointCloud()
+
     private var lastKeyframePose: Pose? = null
     private var keyframeCount = 0
     private var distanceMeters = 0f
@@ -58,6 +62,7 @@ class CaptureSession(
     // reject implausible single-frame jumps.
     private var stableTrackingFrames = 0
     private var prevFramePose: Pose? = null
+    private var depthFrame = 0
 
     fun isCapturing(): Boolean = capturing
 
@@ -75,6 +80,7 @@ class CaptureSession(
         stableTrackingFrames = 0
         prevFramePose = null
         coverageBuffer.clear()
+        seedPointCloud.clear()
         capturing = true
         Log.i(TAG, "capture started → ${dir.absolutePath}")
         emit()
@@ -86,9 +92,10 @@ class CaptureSession(
         capturing = false
         val w = writer
         val intr = intrinsics
-        executor?.execute { w?.finish(intr) }
+        val seed = seedPointCloud.snapshot()
+        executor?.execute { w?.finish(intr, seed) }
         executor?.shutdown()
-        Log.i(TAG, "capture stopped: $keyframeCount keyframes")
+        Log.i(TAG, "capture stopped: $keyframeCount keyframes, ${seed.size} seed points")
         emit()
     }
 
@@ -119,6 +126,30 @@ class CaptureSession(
         // jittery poses after tracking (re)starts never become keyframes.
         stableTrackingFrames++
         if (stableTrackingFrames < TRACKING_WARMUP_FRAMES) return
+
+        // M3 seed: accumulate ARCore feature points (world space) every stable
+        // frame — these become seed.ply so the on-device trainer starts from a
+        // real point cloud instead of random init (+10.8 dB in testing).
+        try {
+            frame.acquirePointCloud().use { pc: PointCloud ->
+                seedPointCloud.addFrom(pc.ids, pc.points, MIN_POINT_CONFIDENCE)
+            }
+        } catch (e: NotYetAvailableException) {
+            // no point cloud this frame — fine
+        } catch (e: Exception) {
+            Log.w(TAG, "seed point-cloud accumulate failed", e)
+        }
+
+        // Polycam-style live coverage: accumulate dense Depth-API samples into
+        // the world coverage map (throttled). Fills in scanned surfaces so the
+        // gaps you haven't covered stay obvious. No-op if depth is unsupported.
+        if (++depthFrame % DEPTH_EVERY_N == 0) {
+            try {
+                DepthCoverage.accumulate(frame, coverageBuffer, DEPTH_STRIDE)
+            } catch (e: Exception) {
+                Log.w(TAG, "depth coverage accumulate failed", e)
+            }
+        }
 
         val last = lastKeyframePose
         if (last != null) {
@@ -188,5 +219,8 @@ class CaptureSession(
         private const val COVERAGE_DISTANCE_M = 1.5f         // dot projected this far ahead
         private const val TRACKING_WARMUP_FRAMES = 30        // ~1 s of stable tracking before capturing
         private const val MAX_FRAME_JUMP_M = 0.30f           // single-frame move above this = tracking glitch
+        private const val MIN_POINT_CONFIDENCE = 0.3f        // drop low-confidence ARCore feature points from the seed
+        private const val DEPTH_EVERY_N = 2                  // sample the depth map every Nth stable frame
+        private const val DEPTH_STRIDE = 2                   // subsample the depth grid (every 2nd pixel)
     }
 }

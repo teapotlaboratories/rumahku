@@ -56,8 +56,8 @@ class CoverageRenderer {
         GLES20.glUseProgram(program)
         GLES20.glUniformMatrix4fv(uViewProj, 1, false, viewProj, 0)
         GLES20.glUniform1f(uPointSize, POINT_SIZE)
-        // Teal, semi-transparent — matches the app accent.
-        GLES20.glUniform4f(uColor, 0.20f, 0.85f, 0.62f, 0.70f)
+        // Teal, translucent — a "processed surface" wash over scanned areas.
+        GLES20.glUniform4f(uColor, 0.16f, 0.84f, 0.66f, 0.45f)
 
         GLES20.glEnableVertexAttribArray(aPosition)
         GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 0, vertexBuffer)
@@ -81,7 +81,7 @@ class CoverageRenderer {
 
     companion object {
         private const val FLOAT_SIZE = 4
-        private const val POINT_SIZE = 90f  // pixel size at 1m; attenuates with depth
+        private const val POINT_SIZE = 60f  // pixel size at 1m; attenuates with depth
 
         // Projects world points and scales point size inversely with view depth.
         private const val VERTEX_SHADER = """
@@ -90,7 +90,7 @@ class CoverageRenderer {
             attribute vec4 a_Position;
             void main() {
                 gl_Position = u_ViewProj * a_Position;
-                gl_PointSize = clamp(u_PointSize / gl_Position.w, 6.0, 46.0);
+                gl_PointSize = clamp(u_PointSize / gl_Position.w, 4.0, 34.0);
             }
         """
 

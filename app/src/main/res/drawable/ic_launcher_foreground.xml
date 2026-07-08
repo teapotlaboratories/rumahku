@@ -1,13 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive-icon foreground: a simple house glyph on the transparent layer.
-     The 108dp canvas with content in the centre ~72dp keeps it inside the
-     "safe zone" that Android may crop to a circle/squircle. -->
+<!-- Adaptive-icon foreground: a clean house mark (rumahku = "my home") in white
+     on the coral brand background, with a coral door + round gable window cut
+     out. Content sits in the centre ~72dp "safe zone" of the 108dp canvas so it
+     survives the circle/squircle mask. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- House: peaked roof + body (one white pentagon). -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,30 L78,50 L78,78 L60,78 L60,62 L48,62 L48,78 L30,78 L30,50 Z" />
+        android:pathData="M54,25 L86,53 L86,85 L22,85 L22,53 Z" />
+    <!-- Round gable window (coral cut-out). -->
+    <path
+        android:fillColor="#FF6B5E"
+        android:pathData="M54,48 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+    <!-- Door (coral cut-out). -->
+    <path
+        android:fillColor="#FF6B5E"
+        android:pathData="M48,67 L60,67 L60,85 L48,85 Z" />
 </vector>
