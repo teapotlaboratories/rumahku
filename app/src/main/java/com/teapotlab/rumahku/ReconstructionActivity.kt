@@ -112,7 +112,11 @@ private fun ReconstructionScreen(datasetDir: String, onClose: () -> Unit) {
     }
 
     val done = everRunning && !running
+    val cancelled = done && result == ReconstructionService.CANCELLED
     val error = done && (result?.startsWith("ERROR") == true)
+
+    // A cancelled build just returns home.
+    androidx.compose.runtime.LaunchedEffect(cancelled) { if (cancelled) onClose() }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -124,6 +128,7 @@ private fun ReconstructionScreen(datasetDir: String, onClose: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterVertically),
         ) {
             when {
+                cancelled -> {} // closing (LaunchedEffect above)
                 error -> {
                     IconBadge(Icons.Filled.Close,
                         MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.error)
@@ -175,6 +180,10 @@ private fun ReconstructionScreen(datasetDir: String, onClose: () -> Unit) {
                     Text("Keep the app open — it runs on the phone's GPU.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedButton(
+                        onClick = { ReconstructionService.cancel() },
+                        modifier = Modifier.padding(top = 6.dp),
+                    ) { Text("Cancel") }
                 }
             }
         }

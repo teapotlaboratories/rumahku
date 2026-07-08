@@ -15,8 +15,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,13 +38,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -104,6 +109,11 @@ private fun HomeScreen() {
     val reconstructing by ReconstructionService.running.collectAsState()
     val scans = remember(reloadKey, reconstructing) { loadScans(context) }
 
+    // Long-press management: an action chooser → rename or delete dialog.
+    var manageScan by remember { mutableStateOf<Scan?>(null) }
+    var renameTarget by remember { mutableStateOf<Scan?>(null) }
+    var deleteTarget by remember { mutableStateOf<Scan?>(null) }
+
     var hasCamera by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -160,10 +170,61 @@ private fun HomeScreen() {
                 item(span = { GridItemSpan(maxLineSpan) }) { EmptyState() }
             } else {
                 items(scans) { scan ->
-                    ScanCard(scan) { onScanClick(context, scan) }
+                    ScanCard(
+                        scan,
+                        onClick = { onScanClick(context, scan) },
+                        onLongClick = { manageScan = scan },
+                    )
                 }
             }
         }
+    }
+
+    // ── Long-press: manage → rename / delete ─────────────────────────────────
+    manageScan?.let { s ->
+        AlertDialog(
+            onDismissRequest = { manageScan = null },
+            title = { Text(s.title, fontWeight = FontWeight.Bold) },
+            text = { Text("Rename or delete this scan.") },
+            confirmButton = {
+                TextButton(onClick = { renameTarget = s; manageScan = null }) { Text("Rename") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = s; manageScan = null }) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+        )
+    }
+    renameTarget?.let { s ->
+        var text by remember(s) { mutableStateOf(s.title) }
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("Rename scan") },
+            text = {
+                OutlinedTextField(value = text, onValueChange = { text = it },
+                    singleLine = true, label = { Text("Name") })
+            },
+            confirmButton = {
+                TextButton(onClick = { renameScan(s.dir, text); renameTarget = null; reloadKey++ }) {
+                    Text("Save")
+                }
+            },
+            dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("Cancel") } },
+        )
+    }
+    deleteTarget?.let { s ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("Delete scan?") },
+            text = { Text("“${s.title}” will be permanently deleted.") },
+            confirmButton = {
+                TextButton(onClick = { s.dir.deleteRecursively(); deleteTarget = null; reloadKey++ }) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -182,11 +243,13 @@ private fun startCapture(context: Context) {
 }
 
 /** Immersive scan card: photo fills the card, title over a gradient scrim. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ScanCard(scan: Scan, onClick: () -> Unit) {
+private fun ScanCard(scan: Scan, onClick: () -> Unit, onLongClick: () -> Unit) {
     val thumb = remember(scan.thumb?.path) { scan.thumb?.let { decodeThumb(it) } }
     Card(
-        modifier = Modifier.fillMaxWidth().clickable { onClick() },
+        modifier = Modifier.fillMaxWidth()
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
         shape = RoundedCornerShape(22.dp),
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(0.82f)) {
@@ -296,9 +359,16 @@ private fun loadScans(context: Context): List<Scan> {
     return dirs.map { dir ->
         val ready = File(dir, "splat").listFiles()?.any { it.extension == "ply" } == true
         val thumb = File(dir, "images/000000.jpg").takeIf { it.exists() }
-        Scan(dir, friendlyTitle(dir.name), thumb,
+        val custom = File(dir, "name.txt").takeIf { it.exists() }?.readText()?.trim()?.ifBlank { null }
+        Scan(dir, custom ?: friendlyTitle(dir.name), thumb,
             if (ready) ScanStatus.READY else ScanStatus.CAPTURED)
     }
+}
+
+/** Persist a user-chosen display name for a scan (blank → revert to the date). */
+private fun renameScan(dir: File, name: String) {
+    val f = File(dir, "name.txt")
+    if (name.isBlank()) f.delete() else f.writeText(name.trim())
 }
 
 private fun friendlyTitle(name: String): String {
