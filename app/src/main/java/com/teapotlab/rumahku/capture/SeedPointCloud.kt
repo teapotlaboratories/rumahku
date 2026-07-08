@@ -17,12 +17,16 @@ import java.nio.IntBuffer
  * COLMAP, no cloud). Points carry stable IDs, so we dedupe across frames and
  * keep the latest (most-refined) position for each.
  *
- * Points accumulate on the GL thread and are read on the writer thread at the
- * end of a session, so access is synchronized.
+ * Each point also carries an **RGB colour** sampled from the camera image at
+ * keyframes ([colorFrom]) — a coloured seed starts training much closer to the
+ * final look than a grey one, which matters in a small on-device iteration budget.
+ *
+ * Points accumulate + are coloured on the GL thread and read on the writer
+ * thread at the end of a session, so access is synchronized.
  */
 class SeedPointCloud {
 
-    // point id -> latest world-space [x, y, z]
+    // point id -> [x, y, z, r, g, b]  (rgb in 0..255; grey until coloured)
     private val points = HashMap<Int, FloatArray>()
 
     /**
@@ -45,14 +49,52 @@ class SeedPointCloud {
             val y = pointBuffer.get(base + 1)
             val z = pointBuffer.get(base + 2)
             if (!x.isFinite() || !y.isFinite() || !z.isFinite()) continue
-            points[idBuffer.get(i)] = floatArrayOf(x, y, z)
+            val id = idBuffer.get(i)
+            val existing = points[id]
+            if (existing != null) {
+                existing[0] = x; existing[1] = y; existing[2] = z // keep colour
+            } else {
+                points[id] = floatArrayOf(x, y, z, 160f, 160f, 160f)
+            }
+        }
+    }
+
+    /**
+     * Colour visible points by sampling the camera image at their projection.
+     * [worldToCam] is the world→camera 4x4 (column-major); [nv21] is the frame's
+     * NV21 image (w×h); intrinsics are for that image (ARCore, −Z forward).
+     */
+    @Synchronized
+    fun colorFrom(
+        worldToCam: FloatArray, flX: Float, flY: Float, cx: Float, cy: Float,
+        nv21: ByteArray, w: Int, h: Int,
+    ) {
+        val m = worldToCam
+        val ySize = w * h
+        for (p in points.values) {
+            val camX = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12]
+            val camY = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13]
+            val camZ = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]
+            val depth = -camZ // ARCore camera looks down −Z
+            if (depth <= 0.1f) continue
+            val u = (flX * camX / depth + cx).toInt()
+            val v = (flY * (-camY) / depth + cy).toInt() // image v is down, camY up
+            if (u < 0 || u >= w || v < 0 || v >= h) continue
+            // NV21 → RGB (Y plane, then interleaved V,U at half resolution).
+            val yv = nv21[v * w + u].toInt() and 0xFF
+            val uvBase = ySize + (v / 2) * w + (u and 1.inv())
+            val vv = nv21[uvBase].toInt() and 0xFF
+            val uu = nv21[uvBase + 1].toInt() and 0xFF
+            p[3] = (yv + 1.402f * (vv - 128)).coerceIn(0f, 255f)
+            p[4] = (yv - 0.344f * (uu - 128) - 0.714f * (vv - 128)).coerceIn(0f, 255f)
+            p[5] = (yv + 1.772f * (uu - 128)).coerceIn(0f, 255f)
         }
     }
 
     @Synchronized
     fun count(): Int = points.size
 
-    /** Snapshot of accumulated world points, safe to read off-thread. */
+    /** Snapshot of accumulated points ([x,y,z,r,g,b]), safe to read off-thread. */
     @Synchronized
     fun snapshot(): List<FloatArray> = points.values.map { it.copyOf() }
 
