@@ -108,7 +108,10 @@ splat on the device, semi-real-time. See `PHASE2.md`.
 - [ ] Cap Gaussian count / LOD / image downscale for the phone GPU
 - [ ] Sustained-compute heat + battery on a long (whole-house) scan
 - [ ] Pause/resume training
-- [ ] Optional "quick (1000) vs high-quality (3000)" mode selector
+- [x] **Quality-mode selector**: tapping "Tap to build" shows Quick (1000) /
+      Balanced (2000, default) / High (3000); iters flow through
+      `ReconstructionActivity` → `ReconstructionService.start(dir, iters)` →
+      `nativeTrain`, and the progress % uses the chosen count. Verified on Pixel 6.
 
 ## UI/UX (product polish) — see `docs/UX.md`
 ### Home + scan library ✅ (done)
