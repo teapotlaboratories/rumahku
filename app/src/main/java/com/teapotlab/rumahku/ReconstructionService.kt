@@ -54,6 +54,7 @@ class ReconstructionService : Service() {
         startForeground(NOTIF_ID, notification("Starting…", ongoing = true))
         acquireWakeLock()
         _result.value = null
+        cancelRequested = false
         _running.value = true
 
         thread(name = "brush-reconstruct") {
@@ -69,19 +70,24 @@ class ReconstructionService : Service() {
                 } catch (_: InterruptedException) { /* stopping */ }
             }
 
-            val out = try {
+            val trained = try {
                 val outDir = File(datasetDir, "splat")
                 BrushTrainer.nativeTrain(datasetDir, outDir.absolutePath, TOTAL_ITERS, MAX_RES, MAX_FRAMES)
             } catch (t: Throwable) {
                 Log.e(TAG, "nativeTrain failed", t)
                 "ERROR: ${t.message}"
             }
+            val out = if (cancelRequested) CANCELLED else trained
 
             _running.value = false
             progress.interrupt()
             _result.value = out
             notify(
-                if (out.startsWith("ERROR")) out else "Done: ${out.substringAfterLast('/')}",
+                when {
+                    out == CANCELLED -> "Cancelled"
+                    out.startsWith("ERROR") -> out
+                    else -> "Done: ${out.substringAfterLast('/')}"
+                },
                 ongoing = false,
             )
             releaseWakeLock()
@@ -143,11 +149,27 @@ class ReconstructionService : Service() {
         private val _result = MutableStateFlow<String?>(null)
         val result: StateFlow<String?> = _result
 
+        /** Sentinel result when the user cancels a build. */
+        const val CANCELLED = "CANCELLED"
+
+        @Volatile
+        private var cancelRequested = false
+
         /** Start a reconstruction of [datasetDir] as a foreground service. */
         fun start(context: Context, datasetDir: String) {
             val intent = Intent(context, ReconstructionService::class.java)
                 .putExtra(EXTRA_DATASET, datasetDir)
             ContextCompat.startForegroundService(context, intent)
+        }
+
+        /**
+         * Cooperatively cancel a running build. The native trainer checks a
+         * CANCEL flag each iteration and returns cleanly — so we stop *gracefully*
+         * instead of force-killing mid-GPU-op (which can abort the process).
+         */
+        fun cancel() {
+            cancelRequested = true
+            BrushTrainer.nativeCancel()
         }
     }
 }
