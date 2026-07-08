@@ -18,9 +18,9 @@ class CoverageRenderer {
 
     private var program = 0
     private var aPosition = 0
+    private var aColor = 0
     private var uViewProj = 0
     private var uPointSize = 0
-    private var uColor = 0
 
     private var vertexBuffer: FloatBuffer =
         ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder()).asFloatBuffer()
@@ -29,24 +29,24 @@ class CoverageRenderer {
     fun createOnGlThread() {
         program = GlUtil.createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         aPosition = GLES20.glGetAttribLocation(program, "a_Position")
+        aColor = GLES20.glGetAttribLocation(program, "a_Color")
         uViewProj = GLES20.glGetUniformLocation(program, "u_ViewProj")
         uPointSize = GLES20.glGetUniformLocation(program, "u_PointSize")
-        uColor = GLES20.glGetUniformLocation(program, "u_Color")
-        ensureCapacity(256 * 3)
+        ensureCapacity(256 * STRIDE_FLOATS)
     }
 
     /**
      * @param viewProj column-major 4x4 = projection * view for this frame
-     * @param points flat [x,y,z,…] world positions (from CoverageBuffer.snapshot)
+     * @param points flat [x,y,z,r,g,b,…] world positions + colour (0..1) from
+     *   CoverageBuffer.snapshot — points recoloured from the camera at keyframes.
      */
     fun draw(viewProj: FloatArray, points: FloatArray) {
-        val count = points.size / 3
+        val count = points.size / STRIDE_FLOATS
         if (count == 0) return
 
         ensureCapacity(points.size)
         vertexBuffer.position(0)
         vertexBuffer.put(points)
-        vertexBuffer.position(0)
 
         // Dots blend over the camera image; no depth interaction needed.
         GLES20.glEnable(GLES20.GL_BLEND)
@@ -56,13 +56,18 @@ class CoverageRenderer {
         GLES20.glUseProgram(program)
         GLES20.glUniformMatrix4fv(uViewProj, 1, false, viewProj, 0)
         GLES20.glUniform1f(uPointSize, POINT_SIZE)
-        // Teal, translucent — a "processed surface" wash over scanned areas.
-        GLES20.glUniform4f(uColor, 0.16f, 0.84f, 0.66f, 0.45f)
 
+        val strideBytes = STRIDE_FLOATS * FLOAT_SIZE
         GLES20.glEnableVertexAttribArray(aPosition)
-        GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 0, vertexBuffer)
+        vertexBuffer.position(0)
+        GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, strideBytes, vertexBuffer)
+        GLES20.glEnableVertexAttribArray(aColor)
+        vertexBuffer.position(3)
+        GLES20.glVertexAttribPointer(aColor, 3, GLES20.GL_FLOAT, false, strideBytes, vertexBuffer)
+
         GLES20.glDrawArrays(GLES20.GL_POINTS, 0, count)
         GLES20.glDisableVertexAttribArray(aPosition)
+        GLES20.glDisableVertexAttribArray(aColor)
 
         GLES20.glDisable(GLES20.GL_BLEND)
         GlUtil.checkGlError("CoverageRenderer.draw")
@@ -71,7 +76,7 @@ class CoverageRenderer {
     /** Grows the vertex buffer to hold at least [floats] floats. */
     private fun ensureCapacity(floats: Int) {
         if (floats <= capacityFloats) return
-        var cap = if (capacityFloats == 0) 256 * 3 else capacityFloats
+        var cap = if (capacityFloats == 0) 256 * STRIDE_FLOATS else capacityFloats
         while (cap < floats) cap *= 2
         vertexBuffer = ByteBuffer.allocateDirect(cap * FLOAT_SIZE)
             .order(ByteOrder.nativeOrder())
@@ -81,29 +86,34 @@ class CoverageRenderer {
 
     companion object {
         private const val FLOAT_SIZE = 4
-        private const val POINT_SIZE = 60f  // pixel size at 1m; attenuates with depth
+        private const val STRIDE_FLOATS = 6   // x,y,z,r,g,b per point
+        private const val POINT_SIZE = 60f    // pixel size at 1m; attenuates with depth
 
-        // Projects world points and scales point size inversely with view depth.
+        // Projects world points and scales point size inversely with view depth,
+        // carrying the per-point colour through to the fragment shader.
         private const val VERTEX_SHADER = """
             uniform mat4 u_ViewProj;
             uniform float u_PointSize;
             attribute vec4 a_Position;
+            attribute vec3 a_Color;
+            varying vec3 v_Color;
             void main() {
+                v_Color = a_Color;
                 gl_Position = u_ViewProj * a_Position;
                 gl_PointSize = clamp(u_PointSize / gl_Position.w, 4.0, 34.0);
             }
         """
 
-        // Round, soft-edged splat via the point's local coordinates.
+        // Round, soft-edged splat tinted by the point's sampled camera colour.
         private const val FRAGMENT_SHADER = """
             precision mediump float;
-            uniform vec4 u_Color;
+            varying vec3 v_Color;
             void main() {
                 vec2 c = gl_PointCoord - vec2(0.5);
                 float d = length(c);
                 if (d > 0.5) discard;
                 float a = smoothstep(0.5, 0.3, d);
-                gl_FragColor = vec4(u_Color.rgb, u_Color.a * a);
+                gl_FragColor = vec4(v_Color, 0.7 * a);
             }
         """
     }
