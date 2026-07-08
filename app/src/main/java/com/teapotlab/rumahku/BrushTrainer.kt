@@ -95,6 +95,7 @@ object BrushTrainer {
         imgH: Int,
         outW: Int,
         outH: Int,
+        levelGravity: Int,
     ): IntArray?
 
     /**

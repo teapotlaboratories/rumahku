@@ -90,6 +90,9 @@ class DatasetWriter(private val sessionDir: File) {
 
     private fun buildTransforms(intrinsics: CameraIntrinsics?, plyFileName: String?): JSONObject {
         val root = JSONObject()
+        // ARCore's world is gravity-aligned (+Y up), so the viewer can level the
+        // walkthrough. (Imported COLMAP datasets omit this → not leveled.)
+        root.put("gravity_up", true)
         // Seed the trainer from the ARCore point cloud when we have one; Brush's
         // nerfstudio loader reads this and skips random init.
         if (plyFileName != null) root.put("ply_file_path", plyFileName)
