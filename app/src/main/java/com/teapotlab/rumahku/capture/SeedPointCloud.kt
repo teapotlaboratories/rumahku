@@ -35,12 +35,17 @@ class SeedPointCloud {
         val n = idBuffer.remaining()
         for (i in 0 until n) {
             val base = i * 4
-            if (pointBuffer.get(base + 3) < minConfidence) continue
-            points[idBuffer.get(i)] = floatArrayOf(
-                pointBuffer.get(base),
-                pointBuffer.get(base + 1),
-                pointBuffer.get(base + 2),
-            )
+            // ARCore occasionally returns points with NaN/Inf coords (or NaN
+            // confidence). A `NaN < min` test is false, so they'd slip through —
+            // and a single NaN aborts the trainer (`assertion failed: !x.is_nan()`).
+            // Reject any non-finite value explicitly.
+            val conf = pointBuffer.get(base + 3)
+            if (!conf.isFinite() || conf < minConfidence) continue
+            val x = pointBuffer.get(base)
+            val y = pointBuffer.get(base + 1)
+            val z = pointBuffer.get(base + 2)
+            if (!x.isFinite() || !y.isFinite() || !z.isFinite()) continue
+            points[idBuffer.get(i)] = floatArrayOf(x, y, z)
         }
     }
 
