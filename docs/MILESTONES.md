@@ -40,9 +40,12 @@ splat on the device, semi-real-time. See `PHASE2.md`.
 - [x] **Foreground service + wakelock** — survives backgrounding/screen-lock
 - [ ] ⬜ Migrate the 44 MB `.so` to Git LFS or a CI build step
 
-### M2 — Semi-real-time / incremental training ⬜ (planned)
-- [ ] Stream keyframes into the trainer as you scan
-- [ ] Show the splat refining live (Brush's `SplatsUpdated` stream)
+### M2 — Semi-real-time / incremental training 🔨 (design; see `M2.md`)
+- [x] Design doc + architecture (`docs/M2.md`): streaming trainer in brush-ffi
+      (`nativeStreamStart/Push/RenderPreview/Finish`) + live preview during capture.
+- [ ] FFI spike: stream views into a long-lived trainer + render current splats
+- [ ] App: streaming service, push keyframes during capture, `.ply` on finish
+- [ ] UI: live preview overlay + contention/thermal throttling
 
 ### M3 — On-device seeding (the quality lever) ✅ (validated + field-tested)
 - [x] Validate the lever on-device: **+10.8 dB** seeded vs random (see `M3.md`)
