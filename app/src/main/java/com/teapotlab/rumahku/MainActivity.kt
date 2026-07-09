@@ -35,7 +35,12 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.PlayArrow
@@ -58,6 +63,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -125,6 +131,16 @@ private fun HomeScreen() {
     var deleteTarget by remember { mutableStateOf<Scan?>(null) }
     var buildScan by remember { mutableStateOf<Scan?>(null) }   // quality picker
     var showSettings by remember { mutableStateOf(false) }      // backend URL editor
+    // Multi-select mode: long-press a card to enter, tap to toggle. Built for
+    // batch delete now, batch export later.
+    var selectionMode by remember { mutableStateOf(false) }
+    val selected = remember { mutableStateListOf<String>() }    // scan dir paths
+    var confirmDeleteSelected by remember { mutableStateOf(false) }
+    fun exitSelection() { selectionMode = false; selected.clear() }
+    fun toggleSelect(dir: String) {
+        if (!selected.remove(dir)) selected.add(dir)
+        if (selected.isEmpty()) selectionMode = false
+    }
 
     // Live build progress for the scan currently reconstructing (shown on its card).
     val currentDir by ReconstructionService.currentDir.collectAsState()
@@ -163,11 +179,13 @@ private fun HomeScreen() {
         modifier = Modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { newScan() },
-                icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                text = { Text("New scan") },
-            )
+            if (!selectionMode) {
+                ExtendedFloatingActionButton(
+                    onClick = { newScan() },
+                    icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                    text = { Text("New scan") },
+                )
+            }
         },
     ) { pad ->
         LazyVerticalGrid(
@@ -178,17 +196,36 @@ private fun HomeScreen() {
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("rumahku", style = MaterialTheme.typography.headlineLarge,
-                            fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                        Text("Scan a room, walk it in 3D",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (selectionMode) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { exitSelection() }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
+                        }
+                        Text("${selected.size} selected", modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        if (selected.size == 1) {
+                            IconButton(onClick = {
+                                renameTarget = scans.find { it.dir.absolutePath == selected.first() }
+                            }) { Icon(Icons.Filled.Edit, contentDescription = "Rename") }
+                        }
+                        IconButton(onClick = { confirmDeleteSelected = true }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete selected",
+                                tint = MaterialTheme.colorScheme.error)
+                        }
                     }
-                    IconButton(onClick = { showSettings = true }) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Settings",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("rumahku", style = MaterialTheme.typography.headlineLarge,
+                                fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            Text("Scan a room, walk it in 3D",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        IconButton(onClick = { showSettings = true }) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Settings",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 }
             }
@@ -207,8 +244,11 @@ private fun HomeScreen() {
                             else -> null
                         },
                         buildLabel = if (cloudBuilding && cj!!.phase == "Queued") "Queued…" else null,
+                        selected = selectionMode && selected.contains(scan.dir.absolutePath),
+                        selectionMode = selectionMode,
                         onClick = {
                             when {
+                                selectionMode -> toggleSelect(scan.dir.absolutePath)
                                 // Resume watching an in-progress cloud build
                                 // (don't start a second one).
                                 cloudBuilding -> launchCloudBuild(
@@ -217,7 +257,9 @@ private fun HomeScreen() {
                                 else -> buildScan = scan
                             }
                         },
-                        onLongClick = { manageScan = scan },
+                        onLongClick = {
+                            if (!selectionMode) { selectionMode = true; selected.add(scan.dir.absolutePath) }
+                        },
                     )
                 }
             }
@@ -250,9 +292,9 @@ private fun HomeScreen() {
                     singleLine = true, label = { Text("Name") })
             },
             confirmButton = {
-                TextButton(onClick = { renameScan(s.dir, text); renameTarget = null; reloadKey++ }) {
-                    Text("Save")
-                }
+                TextButton(onClick = {
+                    renameScan(s.dir, text); renameTarget = null; exitSelection(); reloadKey++
+                }) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("Cancel") } },
         )
@@ -323,6 +365,23 @@ private fun HomeScreen() {
             dismissButton = { TextButton(onClick = { showSettings = false }) { Text("Cancel") } },
         )
     }
+    if (confirmDeleteSelected) {
+        val n = selected.size
+        AlertDialog(
+            onDismissRequest = { confirmDeleteSelected = false },
+            title = { Text("Delete $n scan${if (n > 1) "s" else ""}?") },
+            text = { Text("${if (n > 1) "These scans" else "This scan"} will be permanently deleted.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    selected.toList().forEach { path -> java.io.File(path).deleteRecursively() }
+                    confirmDeleteSelected = false
+                    exitSelection()
+                    reloadKey++
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteSelected = false }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable
@@ -370,18 +429,27 @@ private fun startCapture(context: Context) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ScanCard(scan: Scan, progress: Float?, buildLabel: String? = null,
+                     selected: Boolean = false, selectionMode: Boolean = false,
                      onClick: () -> Unit, onLongClick: () -> Unit) {
     val thumb = remember(scan.thumb?.path) { scan.thumb?.let { decodeThumb(it) } }
     Card(
         modifier = Modifier.fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongClick),
         shape = RoundedCornerShape(22.dp),
+        border = if (selected) BorderStroke(3.dp, MaterialTheme.colorScheme.primary) else null,
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(0.82f)) {
             Thumb(thumb, Modifier.fillMaxSize())
             // Bottom scrim so white text stays legible over any photo.
             Box(Modifier.fillMaxSize().background(
                 Brush.verticalGradient(0.45f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.72f))))
+            if (selectionMode && selected) {
+                Box(Modifier.fillMaxSize()
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)))
+                Icon(Icons.Filled.CheckCircle, contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).size(30.dp))
+            }
             if (progress != null) {
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
                     contentAlignment = Alignment.Center) {
