@@ -172,8 +172,8 @@ private fun WalkthroughScreen(datasetDir: String?) {
         var yaw by remember { mutableFloatStateOf(0f) }
         var pitch by remember { mutableFloatStateOf(0f) }
         var fov by remember { mutableFloatStateOf(1f) }
+        var version by remember { mutableIntStateOf(0) }   // bumped on every gesture change
         var bmp by remember { mutableStateOf<Bitmap?>(null) }
-        var rendering by remember { mutableStateOf(false) }
         val ctx = LocalContext.current
 
         // Render at the screen's aspect (downscaled for speed; upscaled to fill).
@@ -181,19 +181,44 @@ private fun WalkthroughScreen(datasetDir: String?) {
         val hPx = constraints.maxHeight.coerceAtLeast(1)
         val outW = 560
         val outH = (560L * hPx / wPx).toInt().coerceIn(1, 1400)
+        val DRAG_RES = 340   // lower res used while the view is actively moving
 
-        LaunchedEffect(sp, yaw, pitch, fov) {
-            delay(35)
-            rendering = true
+        suspend fun renderAt(w: Int) {
+            val h = (w.toLong() * hPx / wPx).toInt().coerceIn(1, 1400)
             val px = withContext(Dispatchers.Default) {
                 BrushTrainer.nativeRenderLook(
                     scene.plyPath, scene.frames[sp], yaw, pitch, fov,
-                    scene.flX, scene.flY, scene.w, scene.h, outW, outH,
+                    scene.flX, scene.flY, scene.w, scene.h, w, h,
                     if (scene.gravityUp) 1 else 0,
                 )
             }
-            bmp = px?.let { Bitmap.createBitmap(it, outW, outH, Bitmap.Config.ARGB_8888) }
-            rendering = false
+            if (px != null) bmp = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+        }
+        // Continuously render the LATEST view. A gesture just bumps `version`; we
+        // never cancel the in-flight render — when it finishes we render the
+        // current position again, so the view tracks your finger in real time (at
+        // render fps) instead of only updating on release. Once you stop moving
+        // for a moment, one full-resolution pass sharpens it.
+        LaunchedEffect(Unit) {
+            var lastLow = -1
+            var lastSharp = -1
+            var lastChangeAt = 0L
+            while (true) {
+                val v = version
+                when {
+                    v != lastLow -> {
+                        lastLow = v
+                        lastChangeAt = android.os.SystemClock.elapsedRealtime()
+                        renderAt(DRAG_RES)
+                    }
+                    v != lastSharp &&
+                        android.os.SystemClock.elapsedRealtime() - lastChangeAt > 150 -> {
+                        lastSharp = v
+                        renderAt(outW)
+                    }
+                    else -> delay(12)
+                }
+            }
         }
 
         val surface = Modifier
@@ -203,6 +228,7 @@ private fun WalkthroughScreen(datasetDir: String?) {
                     yaw += pan.x * 0.15f
                     pitch = (pitch - pan.y * 0.15f).coerceIn(-80f, 80f)
                     if (zoom != 1f) fov = (fov / zoom).coerceIn(0.4f, 2.2f)
+                    version++
                 }
             }
             .pointerInput(Unit) {
@@ -210,7 +236,7 @@ private fun WalkthroughScreen(datasetDir: String?) {
                     // Move to the standpoint in the direction we're looking.
                     val fwd = BrushTrainer.nativeLookForward(scene.frames[sp], yaw, pitch)
                     sp = nextStandpoint(scene.frames, sp, fwd)
-                    yaw = 0f; pitch = 0f
+                    yaw = 0f; pitch = 0f; version++
                 })
             }
 
