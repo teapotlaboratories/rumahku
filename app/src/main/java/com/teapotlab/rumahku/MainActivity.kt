@@ -37,6 +37,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -44,6 +45,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -111,13 +113,18 @@ private fun HomeScreen() {
     }
 
     val reconstructing by ReconstructionService.running.collectAsState()
-    val scans = remember(reloadKey, reconstructing) { loadScans(context) }
+    val cloudJobs by CloudBuildService.jobs.collectAsState()
+    // Reload the scan list when an on-device or cloud build finishes (a new
+    // splat appears → the scan flips to Ready).
+    val cloudDone = cloudJobs.values.count { it.done }
+    val scans = remember(reloadKey, reconstructing, cloudDone) { loadScans(context) }
 
     // Long-press management: an action chooser → rename or delete dialog.
     var manageScan by remember { mutableStateOf<Scan?>(null) }
     var renameTarget by remember { mutableStateOf<Scan?>(null) }
     var deleteTarget by remember { mutableStateOf<Scan?>(null) }
     var buildScan by remember { mutableStateOf<Scan?>(null) }   // quality picker
+    var showSettings by remember { mutableStateOf(false) }      // backend URL editor
 
     // Live build progress for the scan currently reconstructing (shown on its card).
     val currentDir by ReconstructionService.currentDir.collectAsState()
@@ -171,24 +178,44 @@ private fun HomeScreen() {
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Column {
-                    Text("rumahku", style = MaterialTheme.typography.headlineLarge,
-                        fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    Text("Scan a room, walk it in 3D",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("rumahku", style = MaterialTheme.typography.headlineLarge,
+                            fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        Text("Scan a room, walk it in 3D",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = { showSettings = true }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
             if (scans.isEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) { EmptyState() }
             } else {
                 items(scans) { scan ->
+                    val cj = cloudJobs[scan.dir.absolutePath]
+                    val cloudBuilding = cj != null && !cj.done && cj.error == null
                     ScanCard(
                         scan,
-                        progress = if (reconstructing && scan.dir.absolutePath == currentDir) buildPct else null,
+                        progress = when {
+                            cloudBuilding -> if (cj!!.phase == "Reconstructing" && cj.total > 0 && cj.iter > 0)
+                                (cj.iter.toFloat() / cj.total).coerceIn(0f, 1f) else 0f
+                            reconstructing && scan.dir.absolutePath == currentDir -> buildPct
+                            else -> null
+                        },
+                        buildLabel = if (cloudBuilding && cj!!.phase == "Queued") "Queued…" else null,
                         onClick = {
-                            if (scan.status == ScanStatus.READY) openViewer(context, scan)
-                            else buildScan = scan
+                            when {
+                                // Resume watching an in-progress cloud build
+                                // (don't start a second one).
+                                cloudBuilding -> launchCloudBuild(
+                                    context, scan, cj!!.total.coerceAtLeast(2000), 1920)
+                                scan.status == ScanStatus.READY -> openViewer(context, scan)
+                                else -> buildScan = scan
+                            }
                         },
                         onLongClick = { manageScan = scan },
                     )
@@ -246,15 +273,54 @@ private fun HomeScreen() {
     buildScan?.let { s ->
         AlertDialog(
             onDismissRequest = { buildScan = null },
-            title = { Text("Build quality") },
+            title = { Text("Build your 3D scan") },
             text = {
                 Column {
-                    QualityOption("Quick", "1000 iters · fastest") { launchBuild(context, s, 1000); buildScan = null }
-                    QualityOption("Balanced", "2000 iters · recommended") { launchBuild(context, s, 2000); buildScan = null }
-                    QualityOption("High", "3000 iters · sharpest") { launchBuild(context, s, 3000); buildScan = null }
+                    QualityOption("Cloud · Fast", "1500 iters · GPU, ~2 min") {
+                        launchCloudBuild(context, s, 1500, 720); buildScan = null
+                    }
+                    QualityOption("Cloud · Balanced", "3000 iters · GPU, ~5 min") {
+                        launchCloudBuild(context, s, 3000, 1024); buildScan = null
+                    }
+                    QualityOption("Cloud · High", "6000 iters · best quality") {
+                        launchCloudBuild(context, s, 6000, 1600); buildScan = null
+                    }
+                    QualityOption("On-device", "2000 iters · offline, slower") {
+                        launchBuild(context, s, 2000); buildScan = null
+                    }
                 }
             },
             confirmButton = { TextButton(onClick = { buildScan = null }) { Text("Cancel") } },
+        )
+    }
+    if (showSettings) {
+        var url by remember { mutableStateOf(Settings.backendUrl(context)) }
+        AlertDialog(
+            onDismissRequest = { showSettings = false },
+            title = { Text("Cloud backend") },
+            text = {
+                Column {
+                    Text("Server address used for cloud builds.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedTextField(
+                        value = url, onValueChange = { url = it }, singleLine = true,
+                        label = { Text("http://host:port") },
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    )
+                    TextButton(onClick = { url = Settings.DEFAULT_BACKEND_URL }) {
+                        Text("Reset to default")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    Settings.setBackendUrl(context, url)
+                    showSettings = false
+                    Toast.makeText(context, "Backend saved", Toast.LENGTH_SHORT).show()
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { showSettings = false }) { Text("Cancel") } },
         )
     }
 }
@@ -283,6 +349,18 @@ private fun launchBuild(context: Context, scan: Scan, iters: Int) {
     )
 }
 
+private fun launchCloudBuild(context: Context, scan: Scan, iters: Int, maxRes: Int) {
+    // Start the background build (idempotent for an already-building scan), then
+    // open the watch screen. Leaving that screen keeps the build running.
+    CloudBuildService.start(context, scan.dir.absolutePath, iters, maxRes)
+    context.startActivity(
+        Intent(context, CloudBuildActivity::class.java)
+            .putExtra(CloudBuildActivity.EXTRA_DATASET, scan.dir.absolutePath)
+            .putExtra(CloudBuildActivity.EXTRA_ITERS, iters)
+            .putExtra(CloudBuildActivity.EXTRA_MAXRES, maxRes)
+    )
+}
+
 private fun startCapture(context: Context) {
     context.startActivity(Intent(context, CaptureActivity::class.java))
 }
@@ -291,7 +369,8 @@ private fun startCapture(context: Context) {
  *  When [progress] is non-null the scan is building — show a live ring. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ScanCard(scan: Scan, progress: Float?, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun ScanCard(scan: Scan, progress: Float?, buildLabel: String? = null,
+                     onClick: () -> Unit, onLongClick: () -> Unit) {
     val thumb = remember(scan.thumb?.path) { scan.thumb?.let { decodeThumb(it) } }
     Card(
         modifier = Modifier.fillMaxWidth()
@@ -326,7 +405,8 @@ private fun ScanCard(scan: Scan, progress: Float?, onClick: () -> Unit, onLongCl
                 Text(scan.title, color = Color.White,
                     style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 Text(
-                    if (progress != null) "Building ${(progress * 100).toInt()}%" else secondaryLabel(scan.status),
+                    if (progress != null) (buildLabel ?: "Building ${(progress * 100).toInt()}%")
+                    else secondaryLabel(scan.status),
                     color = Color.White.copy(alpha = 0.85f),
                     style = MaterialTheme.typography.labelSmall,
                 )

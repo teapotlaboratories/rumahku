@@ -25,3 +25,6 @@ pixel-pin
 
 # build logs
 gradle_build.log
+
+# Python backend caches
+backend/__pycache__/
