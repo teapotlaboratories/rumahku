@@ -6,22 +6,23 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Draws the live [com.teapotlab.rumahku.ar.TsdfVolume] surface — the rough mesh
- * reconstructed from the depth stream via TSDF fusion + marching cubes, with a
- * wireframe overlay (the Polycam/Scaniverse "reconstructing as you scan" look).
+ * Draws the live [com.teapotlab.rumahku.ar.TsdfVolume] surface — the mesh
+ * reconstructed from the depth stream via TSDF fusion + marching cubes.
  *
- * Triangle soup, 8 floats/vertex: position(3) + colour(3) + barycentric(2). The
- * wireframe is computed per-fragment from the barycentric coords (edge = the
- * smallest of the three), so no separate line pass is needed. Depth-tested so
- * near surfaces occlude far ones; semi-transparent fill so the camera shows
- * through.
+ * Rendered as an **opaque, lit solid surface** (Mobile3DRecon look): the per-
+ * fragment normal is derived from screen-space derivatives of the world
+ * position, so no normal attribute is needed, and simple diffuse shading gives
+ * the mesh readable 3D form over the camera. Depth-tested so near surfaces
+ * occlude far ones.
+ *
+ * Triangle soup, 8 floats/vertex: position(3) + colour(3) + barycentric(2); the
+ * barycentric pair is unused here (kept so the buffer layout matches TsdfVolume).
  */
 class DepthMeshRenderer {
 
     private var program = 0
     private var aPosition = 0
     private var aColor = 0
-    private var aBary = 0
     private var uViewProj = 0
 
     private var vertexBuffer: FloatBuffer =
@@ -32,14 +33,13 @@ class DepthMeshRenderer {
         program = GlUtil.createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         aPosition = GLES20.glGetAttribLocation(program, "a_Position")
         aColor = GLES20.glGetAttribLocation(program, "a_Color")
-        aBary = GLES20.glGetAttribLocation(program, "a_Bary")
         uViewProj = GLES20.glGetUniformLocation(program, "u_ViewProj")
         ensureCapacity(1024 * STRIDE_FLOATS)
     }
 
     /**
      * @param viewProj column-major 4x4 = projection * view for this frame
-     * @param verts triangle soup [x,y,z,r,g,b,bx,by,…] from DepthMesh.snapshot
+     * @param verts triangle soup [x,y,z,r,g,b,bx,by,…] from TsdfVolume.snapshot
      */
     fun draw(viewProj: FloatArray, verts: FloatArray) {
         val count = verts.size / STRIDE_FLOATS
@@ -66,15 +66,11 @@ class DepthMeshRenderer {
         GLES20.glEnableVertexAttribArray(aColor)
         vertexBuffer.position(3)
         GLES20.glVertexAttribPointer(aColor, 3, GLES20.GL_FLOAT, false, strideBytes, vertexBuffer)
-        GLES20.glEnableVertexAttribArray(aBary)
-        vertexBuffer.position(6)
-        GLES20.glVertexAttribPointer(aBary, 2, GLES20.GL_FLOAT, false, strideBytes, vertexBuffer)
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, count)
 
         GLES20.glDisableVertexAttribArray(aPosition)
         GLES20.glDisableVertexAttribArray(aColor)
-        GLES20.glDisableVertexAttribArray(aBary)
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glDisable(GLES20.GL_BLEND)
         GlUtil.checkGlError("DepthMeshRenderer.draw")
@@ -92,35 +88,34 @@ class DepthMeshRenderer {
 
     companion object {
         private const val FLOAT_SIZE = 4
-        private const val STRIDE_FLOATS = 8   // x,y,z,r,g,b,bx,by
+        private const val STRIDE_FLOATS = 8   // x,y,z,r,g,b,bx,by (bary unused here)
 
         private const val VERTEX_SHADER = """
             uniform mat4 u_ViewProj;
             attribute vec4 a_Position;
             attribute vec3 a_Color;
-            attribute vec2 a_Bary;
             varying vec3 v_Color;
-            varying vec2 v_Bary;
+            varying vec3 v_World;
             void main() {
                 v_Color = a_Color;
-                v_Bary = a_Bary;
+                v_World = a_Position.xyz;
                 gl_Position = u_ViewProj * a_Position;
             }
         """
 
-        // Semi-transparent coloured fill + a white wireframe from the barycentric
-        // coords (edge = smallest of the three; the third = 1 - x - y).
+        // Flat-shaded solid surface: the face normal comes from screen-space
+        // derivatives of the world position (needs GL_OES_standard_derivatives),
+        // lit by a single fixed direction. abs(dot) so either winding is lit.
         private const val FRAGMENT_SHADER = """
+            #extension GL_OES_standard_derivatives : enable
             precision mediump float;
             varying vec3 v_Color;
-            varying vec2 v_Bary;
+            varying vec3 v_World;
             void main() {
-                vec3 bary = vec3(v_Bary, 1.0 - v_Bary.x - v_Bary.y);
-                float edge = min(min(bary.x, bary.y), bary.z);
-                float wire = 1.0 - smoothstep(0.0, 0.02, edge);
-                vec3 col = mix(v_Color, vec3(1.0), wire * 0.7);
-                float alpha = mix(0.35, 0.9, wire);
-                gl_FragColor = vec4(col, alpha);
+                vec3 n = normalize(cross(dFdx(v_World), dFdy(v_World)));
+                vec3 l = normalize(vec3(0.35, 0.85, 0.40));
+                float diff = 0.55 + 0.45 * abs(dot(n, l));
+                gl_FragColor = vec4(v_Color * diff, 0.96);
             }
         """
     }
