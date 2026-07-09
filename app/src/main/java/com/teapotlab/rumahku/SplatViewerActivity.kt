@@ -226,7 +226,7 @@ private fun WalkthroughScreen(datasetDir: String?) {
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     yaw += pan.x * 0.15f
-                    pitch = (pitch - pan.y * 0.15f).coerceIn(-80f, 80f)
+                    pitch = (pitch + pan.y * 0.15f).coerceIn(-80f, 80f)
                     if (zoom != 1f) fov = (fov / zoom).coerceIn(0.4f, 2.2f)
                     version++
                 }

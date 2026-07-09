@@ -584,7 +584,14 @@ private fun decodeThumb(file: File, maxPx: Int = 500): Bitmap? = try {
     BitmapFactory.decodeFile(file.absolutePath, bounds)
     var sample = 1
     while (bounds.outWidth / sample > maxPx || bounds.outHeight / sample > maxPx) sample *= 2
-    BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sample })
+    val bmp = BitmapFactory.decodeFile(
+        file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sample })
+    // Keyframes are stored in the camera's landscape sensor frame; rotate to the
+    // upright (portrait) orientation the phone was held in for the card thumbnail.
+    bmp?.let {
+        val m = android.graphics.Matrix().apply { postRotate(90f) }
+        Bitmap.createBitmap(it, 0, 0, it.width, it.height, m, true)
+    }
 } catch (e: Exception) {
     null
 }
