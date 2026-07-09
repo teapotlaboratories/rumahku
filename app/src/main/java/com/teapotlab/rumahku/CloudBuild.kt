@@ -28,6 +28,7 @@ object CloudBuild {
         val iter: Int = 0,
         val total: Int = 0,
         val elapsed: Int = 0,
+        val jobId: String? = null,   // backend job id (once known) — for cancel
     )
 
     /**
@@ -53,16 +54,18 @@ object CloudBuild {
                 when (st.optString("state")) {
                     "done" -> break
                     "error" -> throw RuntimeException(st.optString("error", "backend error"))
-                    "queued" -> onProgress(Progress("Queued", iter = st.optInt("queue_pos")))
+                    "cancelled" -> throw kotlinx.coroutines.CancellationException("cancelled")
+                    "queued" -> onProgress(
+                        Progress("Queued", iter = st.optInt("queue_pos"), jobId = jobId))
                     else -> onProgress(
                         Progress("Reconstructing", iter = st.optInt("iter"),
-                            total = st.optInt("total"), elapsed = st.optInt("elapsed")),
+                            total = st.optInt("total"), elapsed = st.optInt("elapsed"), jobId = jobId),
                     )
                 }
                 delay(2000)
             }
 
-            onProgress(Progress("Downloading"))
+            onProgress(Progress("Downloading", jobId = jobId))
             // The app marks a scan READY when <scanDir>/splat/ holds a .ply and
             // the viewer loads from there.
             val out = File(scanDir, "splat/cloud.ply")
@@ -125,6 +128,19 @@ object CloudBuild {
         val conn = URL("$baseUrl/jobs/$jobId/result").openConnection() as HttpURLConnection
         conn.connectTimeout = 15000; conn.readTimeout = 120000
         conn.inputStream.use { ins -> out.outputStream().use { ins.copyTo(it) } }
+    }
+
+    /** Ask the backend to cancel a job (kills the GPU training). Best-effort. */
+    fun cancelJob(jobId: String, baseUrl: String) {
+        try {
+            val conn = URL("$baseUrl/jobs/$jobId").openConnection() as HttpURLConnection
+            conn.requestMethod = "DELETE"
+            conn.connectTimeout = 8000; conn.readTimeout = 8000
+            conn.responseCode
+            conn.disconnect()
+        } catch (e: Exception) {
+            Log.w(TAG, "cancel failed: ${e.message}")
+        }
     }
 
     private const val TAG = "rumahku-cloud"
