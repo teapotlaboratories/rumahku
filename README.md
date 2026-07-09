@@ -81,6 +81,9 @@ See [`docs/BACKEND.md`](docs/BACKEND.md) for the architecture and
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — on-device pipeline
 - [`docs/BACKEND.md`](docs/BACKEND.md) — hybrid cloud reconstruction
-- [`docs/REFERENCE_ARCHITECTURE.md`](docs/REFERENCE_ARCHITECTURE.md) — industry survey: cloud 3DGS for Android (target architecture)
+- **Reference** (`docs/reference/`) — industry surveys guiding the target architecture:
+  - [`capture-coverage-visualization.md`](docs/reference/capture-coverage-visualization.md) — live coverage overlay UX
+  - [`pipeline-tuning-guide.md`](docs/reference/pipeline-tuning-guide.md) — RGB→SfM→3DGS→mesh/floor-plan tuning
+  - [`production-architecture.md`](docs/reference/production-architecture.md) — end-to-end cloud platform
 - [`docs/MILESTONES.md`](docs/MILESTONES.md) — roadmap / milestones
 - [`TODO.md`](TODO.md) — upcoming work
