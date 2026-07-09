@@ -58,7 +58,7 @@ def _worker():
         try:
             with LOCK:
                 j = JOBS.get(job_id)
-                if j is None or j.get("state") == "error":
+                if j is None or j.get("state") in ("error", "cancelled"):
                     continue  # gone/cancelled while queued
                 j.update(state="running", started=time.time())
             _run_job(job_id, ds_dir, iters, max_res)
@@ -97,6 +97,8 @@ def _run_job(job_id: str, ds_dir: str, iters: int, max_res: int):
     try:
         with open(log_path, "wb") as lf:
             proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=ds_dir, env=env)
+        with LOCK:
+            JOBS[job_id]["proc"] = proc      # so DELETE can terminate it
         # Poll the log for iteration progress while the process runs.
         while proc.poll() is None:
             time.sleep(2.0)
@@ -108,7 +110,9 @@ def _run_job(job_id: str, ds_dir: str, iters: int, max_res: int):
         return
     plys = sorted(glob.glob(os.path.join(out_dir, "*.ply")))
     with LOCK:
-        if rc == 0 and plys:
+        if JOBS[job_id].get("state") == "cancelled":
+            pass                              # user cancelled — leave it
+        elif rc == 0 and plys:
             JOBS[job_id].update(state="done", ply=plys[-1], iter=iters)
         else:
             tail = _log_tail(log_path)
@@ -209,6 +213,26 @@ class Handler(BaseHTTPRequestHandler):
             if j.get("error"):
                 out["error"] = j["error"]
             return self._json(200, out)
+        self._json(404, {"error": "not found"})
+
+    def do_DELETE(self):
+        """Cancel a job: kill the training process (if running) and mark it
+        cancelled. A queued job is skipped when a worker reaches it."""
+        parts = self.path.strip("/").split("/")
+        if len(parts) >= 2 and parts[0] == "jobs":
+            job_id = parts[1]
+            with LOCK:
+                j = JOBS.get(job_id)
+                if not j:
+                    return self._json(404, {"error": "no such job"})
+                proc = j.get("proc")
+                j["state"] = "cancelled"
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+            return self._json(200, {"ok": True, "state": "cancelled"})
         self._json(404, {"error": "not found"})
 
     def log_message(self, *args):  # quiet

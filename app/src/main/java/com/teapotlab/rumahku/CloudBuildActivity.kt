@@ -16,6 +16,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -113,6 +114,12 @@ private fun CloudBuildScreen(scanDir: File, onClose: () -> Unit) {
                     }
                     OutlinedButton(onClick = onClose, modifier = Modifier.padding(top = 6.dp)) {
                         Text("Keep building in background")
+                    }
+                    TextButton(onClick = {
+                        CloudBuildService.cancel(context, scanDir.absolutePath)
+                        onClose()
+                    }) {
+                        Text("Cancel build", color = MaterialTheme.colorScheme.error)
                     }
                 }
             }
