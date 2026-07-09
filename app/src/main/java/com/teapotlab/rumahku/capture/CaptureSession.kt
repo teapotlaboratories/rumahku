@@ -16,11 +16,15 @@ import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.sqrt
 
+/** A short guidance cue shown on the capture screen. */
+enum class CaptureHint { NONE, FINDING, MOVE_SLOWER, HOLD_STEADY }
+
 /** Immutable snapshot of capture progress, for the UI. */
 data class CaptureProgress(
     val capturing: Boolean = false,
     val keyframes: Int = 0,
     val distanceMeters: Float = 0f,
+    val hint: CaptureHint = CaptureHint.NONE,
 )
 
 /**
@@ -55,6 +59,7 @@ class CaptureSession(
     private var keyframeCount = 0
     private var distanceMeters = 0f
     private var intrinsics: CameraIntrinsics? = null
+    private var hint = CaptureHint.FINDING
 
     // Tracking-stability gate: ARCore poses can jump while tracking settles
     // (or briefly re-acquires). Capturing during that window produces garbage
@@ -109,6 +114,7 @@ class CaptureSession(
             // Lost tracking: reset the warm-up so we wait for it to re-settle.
             stableTrackingFrames = 0
             prevFramePose = null
+            setHint(CaptureHint.FINDING)
             return
         }
 
@@ -123,13 +129,14 @@ class CaptureSession(
         prevFrameTimeNanos = nowNanos
         if (prev != null && translationBetween(prev, pose) > MAX_FRAME_JUMP_M) {
             stableTrackingFrames = 0
+            setHint(CaptureHint.FINDING)
             return
         }
 
         // Warm-up: require a run of stable frames before capturing, so the first
         // jittery poses after tracking (re)starts never become keyframes.
         stableTrackingFrames++
-        if (stableTrackingFrames < TRACKING_WARMUP_FRAMES) return
+        if (stableTrackingFrames < TRACKING_WARMUP_FRAMES) { setHint(CaptureHint.FINDING); return }
 
         // M3 seed: accumulate ARCore feature points (world space) every stable
         // frame — these become seed.ply so the on-device trainer starts from a
@@ -148,7 +155,7 @@ class CaptureSession(
         if (last != null) {
             val moved = translationBetween(last, pose)
             val turned = rotationRadiansBetween(last, pose)
-            if (moved < MIN_TRANSLATION_M && turned < MIN_ROTATION_RAD) return
+            if (moved < MIN_TRANSLATION_M && turned < MIN_ROTATION_RAD) { setHint(CaptureHint.NONE); return }
         }
 
         // Sharpness gate: only capture when the phone is nearly still. Fast
@@ -158,7 +165,9 @@ class CaptureSession(
             val dt = (nowNanos - prevTs) / 1e9f
             val linVel = translationBetween(prev, pose) / dt
             val angVel = rotationRadiansBetween(prev, pose) / dt
-            if (linVel > MAX_STILL_LIN_VEL || angVel > MAX_STILL_ANG_VEL) return
+            if (linVel > MAX_STILL_LIN_VEL || angVel > MAX_STILL_ANG_VEL) {
+                setHint(CaptureHint.MOVE_SLOWER); return
+            }
         }
 
         val image = try {
@@ -181,8 +190,10 @@ class CaptureSession(
             val sharp = sharpness(nv21, width, height)
             if (sharp < MIN_SHARPNESS) {
                 Log.d(TAG, "reject blurry keyframe sharpness=%.0f".format(sharp))
+                setHint(CaptureHint.HOLD_STEADY)
                 return
             }
+            hint = CaptureHint.NONE   // a keyframe is being captured — all good
 
             val matrix = FloatArray(16)
             pose.toMatrix(matrix, 0)
@@ -221,7 +232,12 @@ class CaptureSession(
         }
     }
 
-    private fun emit() = onProgress(CaptureProgress(capturing, keyframeCount, distanceMeters))
+    private fun emit() = onProgress(CaptureProgress(capturing, keyframeCount, distanceMeters, hint))
+
+    /** Update the guidance cue, pushing to the UI only when it actually changes. */
+    private fun setHint(h: CaptureHint) {
+        if (h != hint) { hint = h; emit() }
+    }
 
     /** Euclidean distance between two poses' translations, in meters. */
     private fun translationBetween(a: Pose, b: Pose): Float {
