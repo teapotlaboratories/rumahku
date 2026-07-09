@@ -19,6 +19,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
@@ -225,8 +229,10 @@ private fun WalkthroughScreen(datasetDir: String?) {
             .fillMaxSize()
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
-                    yaw += pan.x * 0.15f
-                    pitch = (pitch + pan.y * 0.15f).coerceIn(-80f, 80f)
+                    // Scale look sensitivity by the zoom level so a drag moves the
+                    // view by a consistent on-screen amount — finer when zoomed in.
+                    yaw += pan.x * 0.15f * fov
+                    pitch = (pitch + pan.y * 0.15f * fov).coerceIn(-80f, 80f)
                     if (zoom != 1f) fov = (fov / zoom).coerceIn(0.4f, 2.2f)
                     version++
                 }
@@ -251,8 +257,18 @@ private fun WalkthroughScreen(datasetDir: String?) {
         }
 
         // ── Minimal overlay ──────────────────────────────────────────────────
-        Pill("${sp + 1} / ${scene.frames.size}",
-            Modifier.align(Alignment.TopCenter).padding(top = 28.dp))
+        // Frame counter flanked by step arrows — walk along the captured frames.
+        Row(
+            Modifier.align(Alignment.TopCenter).padding(top = 24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            IconPill(Icons.Filled.KeyboardArrowLeft, "previous frame",
+                Modifier.clickable { sp = (sp - 1).coerceAtLeast(0); version++ })
+            Pill("${sp + 1} / ${scene.frames.size}")
+            IconPill(Icons.Filled.KeyboardArrowRight, "next frame",
+                Modifier.clickable { sp = (sp + 1).coerceAtMost(scene.frames.size - 1); version++ })
+        }
 
         IconPill(Icons.Filled.Refresh, "recenter", Modifier
             .align(Alignment.TopEnd)

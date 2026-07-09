@@ -42,7 +42,6 @@ import com.google.ar.core.exceptions.UnavailableException
 import com.teapotlab.rumahku.ar.ArRenderer
 import com.teapotlab.rumahku.ar.TsdfVolume
 import com.teapotlab.rumahku.ar.DisplayRotationHelper
-import com.teapotlab.rumahku.capture.CaptureHint
 import com.teapotlab.rumahku.capture.CaptureProgress
 import com.teapotlab.rumahku.capture.CaptureSession
 
@@ -315,29 +314,6 @@ private fun CaptureControls(
                 },
                 color = Color.White,
                 fontWeight = FontWeight.Medium,
-            )
-        }
-        // Live capture guidance — appears when frames are being dropped so the
-        // user knows to steady up (otherwise coverage silently stalls).
-        if (progress.capturing && progress.hint != CaptureHint.NONE) {
-            val warn = progress.hint == CaptureHint.MOVE_SLOWER ||
-                progress.hint == CaptureHint.HOLD_STEADY
-            Text(
-                text = when (progress.hint) {
-                    CaptureHint.MOVE_SLOWER -> "Move slower"
-                    CaptureHint.HOLD_STEADY -> "Hold steady — too blurry"
-                    CaptureHint.FINDING -> "Finding your position…"
-                    CaptureHint.NONE -> ""
-                },
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .background(
-                        if (warn) Color(0xE6FF6B5E) else Color(0xAA000000),
-                        RoundedCornerShape(24.dp),
-                    )
-                    .padding(horizontal = 22.dp, vertical = 12.dp),
             )
         }
     }
