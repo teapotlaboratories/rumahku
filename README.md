@@ -81,5 +81,6 @@ See [`docs/BACKEND.md`](docs/BACKEND.md) for the architecture and
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — on-device pipeline
 - [`docs/BACKEND.md`](docs/BACKEND.md) — hybrid cloud reconstruction
+- [`docs/REFERENCE_ARCHITECTURE.md`](docs/REFERENCE_ARCHITECTURE.md) — industry survey: cloud 3DGS for Android (target architecture)
 - [`docs/MILESTONES.md`](docs/MILESTONES.md) — roadmap / milestones
 - [`TODO.md`](TODO.md) — upcoming work
