@@ -1,36 +1,35 @@
 # TODO
 
-Parked / upcoming work. See `README.md` for the project overview.
+See `README.md` for the project overview.
 
-## Backend → cloud GPU
-Move the reconstruction backend off the personal GPU box to a cloud GPU.
+## Focus: reconstruction quality
+The cloud pipeline is fast + measured (PSNR/SSIM) but the splats look weak
+(~21 dB @ 2k iters; good splats are 25–35+). Improve quality — see the notes
+being gathered in `docs/` and the leading hypotheses:
 
-- [ ] **Validate `backend/Dockerfile` on a real cloud GPU** (RunPod / vast.ai /
-      Lambda). The image is written and correct for a standard driver stack, but
-      the dev box's bleeding-edge NVIDIA driver (610.x) fights the in-container
-      Vulkan path, so it can't be validated locally — the definitive test is on
-      a mainstream cloud driver, where in-container Vulkan is the normal path.
-      Key requirements already baked in: `NVIDIA_DRIVER_CAPABILITIES` must include
-      `graphics`, and `libvulkan1 + libx11-6 + libxext6` must be installed.
-- [ ] **Token auth** on `/jobs` — the service is currently unauthenticated
-      (fine on the VPN, required before any public exposure).
-- [ ] **`.dockerignore` + deploy README** so the build context is lean and the
-      deploy is repeatable.
-- [ ] **Serverless option** (RunPod Serverless / Modal / Beam) for scale-to-zero
-      once there's real traffic — wrap `_run_job` in the provider's handler.
-- [ ] **Job retention / cleanup** — old uploads + `.ply` outputs accumulate in
-      `JOBS_DIR`; add a TTL sweep.
+- [ ] **Pose accuracy** — we feed Brush raw ARCore VIO poses (not SfM-refined).
+      Splatting is very pose-sensitive; this is the top suspect. Try Brush's
+      camera/pose optimization during training, and/or a COLMAP refinement pass.
+- [ ] **More iters / higher res** — now that the GPU is fast, push iters + res
+      and watch PSNR vs. iters to find the real ceiling.
+- [ ] **Capture coverage** — ensure enough overlapping views per surface; the
+      gate keeps sharp frames but coverage/overlap may be thin.
+- [ ] **Intrinsics / camera model** — verify focal + principal point; phone wide
+      lenses have distortion a pinhole model doesn't capture.
 
-## App features
-- [ ] **Batch export** — the home multi-select was built for delete *and*
-      export; add export/share of selected scans (`.ply` / `.zip`).
-- [ ] **On-device reconstruction cancel** — cancel works for cloud builds but
-      not the offline (on-device) training path yet.
+## Backlog
+### Backend → cloud GPU
+- [ ] Validate `backend/Dockerfile` on a real cloud GPU (RunPod / vast.ai).
+- [ ] Token auth on `/jobs` (required before public exposure).
+- [ ] `.dockerignore` + deploy README.
+- [ ] Serverless option (RunPod Serverless / Modal) for scale-to-zero.
+- [ ] Job retention / cleanup (old uploads + `.ply` pile up in `JOBS_DIR`).
 
-## Resolved / not needed
-- [x] **Backend survives reboot** — the backend is a persistent, enabled
-      `systemd --user` service (`~/.config/systemd/user/rumahku-backend.service`)
-      that auto-starts and restarts on failure.
-- [x] **Distrobox auto-start on host boot ("Fix 2")** — *not needed*: verified
-      by an actual reboot that the container comes up on its own and the backend
-      auto-starts with it. Full auto-recovery, zero intervention.
+### App features
+- [ ] Batch export — extend the home multi-select to export scans (`.ply`/`.zip`).
+- [ ] On-device reconstruction cancel (cloud cancel exists; offline path doesn't).
+
+## Resolved
+- [x] **Backend survives reboot** — persistent, enabled `systemd --user` service;
+      verified by a live reboot (container + backend auto-recover, GPU intact).
+- [x] **Cloud GPU speed** — train on the host via `distrobox-host-exec` (~14–19×).
