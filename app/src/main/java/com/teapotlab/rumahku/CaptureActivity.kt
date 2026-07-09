@@ -99,7 +99,7 @@ class CaptureActivity : ComponentActivity() {
         setContent {
             Box(modifier = Modifier.fillMaxSize()) {
                 AndroidView(factory = { glSurfaceView }, modifier = Modifier.fillMaxSize())
-                StatusOverlay(status, progress)
+                StatusOverlay(status)
                 CaptureControls(
                     progress = progress,
                     tracking = status.tracking == TrackingState.TRACKING,
@@ -244,28 +244,16 @@ data class CaptureStatus(
 )
 
 @androidx.compose.runtime.Composable
-private fun StatusOverlay(status: CaptureStatus, progress: CaptureProgress) {
-    // Actionable capture warnings take over the top banner (coral) so the user
-    // sees why frames are being dropped; otherwise show the tracking status.
-    val warn = progress.capturing &&
-        (progress.hint == CaptureHint.MOVE_SLOWER || progress.hint == CaptureHint.HOLD_STEADY)
-    val text = when {
-        warn && progress.hint == CaptureHint.MOVE_SLOWER -> "Move slower"
-        warn && progress.hint == CaptureHint.HOLD_STEADY -> "Hold steady — too blurry"
-        else -> status.hint()
-    }
+private fun StatusOverlay(status: CaptureStatus) {
     Box(modifier = Modifier.fillMaxSize()) {
         Text(
-            text = text,
+            text = status.hint(),
             color = Color.White,
-            fontWeight = if (warn) FontWeight.Bold else FontWeight.Medium,
+            fontWeight = FontWeight.Medium,
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .padding(top = 48.dp)
-                .background(
-                    if (warn) Color(0xE6FF6B5E) else Color(0xAA000000),
-                    RoundedCornerShape(24.dp),
-                )
+                .background(Color(0xAA000000), RoundedCornerShape(24.dp))
                 .padding(horizontal = 20.dp, vertical = 10.dp),
         )
     }
@@ -327,6 +315,29 @@ private fun CaptureControls(
                 },
                 color = Color.White,
                 fontWeight = FontWeight.Medium,
+            )
+        }
+        // Live capture guidance — appears when frames are being dropped so the
+        // user knows to steady up (otherwise coverage silently stalls).
+        if (progress.capturing && progress.hint != CaptureHint.NONE) {
+            val warn = progress.hint == CaptureHint.MOVE_SLOWER ||
+                progress.hint == CaptureHint.HOLD_STEADY
+            Text(
+                text = when (progress.hint) {
+                    CaptureHint.MOVE_SLOWER -> "Move slower"
+                    CaptureHint.HOLD_STEADY -> "Hold steady — too blurry"
+                    CaptureHint.FINDING -> "Finding your position…"
+                    CaptureHint.NONE -> ""
+                },
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(
+                        if (warn) Color(0xE6FF6B5E) else Color(0xAA000000),
+                        RoundedCornerShape(24.dp),
+                    )
+                    .padding(horizontal = 22.dp, vertical = 12.dp),
             )
         }
     }
