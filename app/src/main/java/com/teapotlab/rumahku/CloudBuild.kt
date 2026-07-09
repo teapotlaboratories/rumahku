@@ -36,7 +36,8 @@ object CloudBuild {
      * `<scanDir>/cloud.ply`. Returns that file. Throws on failure.
      */
     suspend fun build(
-        scanDir: File, iters: Int, maxRes: Int, baseUrl: String, onProgress: (Progress) -> Unit,
+        scanDir: File, iters: Int, maxRes: Int, baseUrl: String, trainer: String = "brush",
+        onProgress: (Progress) -> Unit,
     ): File = withContext(Dispatchers.IO) {
         onProgress(Progress("Packaging"))
         val zip = File(scanDir.parentFile, "${scanDir.name}_upload.zip")
@@ -44,7 +45,7 @@ object CloudBuild {
             zipDataset(scanDir, zip)
 
             onProgress(Progress("Uploading", pct = 0))
-            val jobId = postJob(zip, iters, maxRes, baseUrl) { pct ->
+            val jobId = postJob(zip, iters, maxRes, baseUrl, trainer) { pct ->
                 onProgress(Progress("Uploading", pct = pct))
             }
             Log.i(TAG, "cloud job $jobId started")
@@ -92,8 +93,8 @@ object CloudBuild {
         }
     }
 
-    private fun postJob(zip: File, iters: Int, maxRes: Int, baseUrl: String, onUpload: (Int) -> Unit): String {
-        val conn = URL("$baseUrl/jobs?iters=$iters&max_res=$maxRes").openConnection() as HttpURLConnection
+    private fun postJob(zip: File, iters: Int, maxRes: Int, baseUrl: String, trainer: String, onUpload: (Int) -> Unit): String {
+        val conn = URL("$baseUrl/jobs?iters=$iters&max_res=$maxRes&trainer=$trainer").openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/zip")

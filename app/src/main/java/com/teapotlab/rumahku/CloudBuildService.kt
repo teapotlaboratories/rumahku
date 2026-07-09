@@ -55,6 +55,7 @@ class CloudBuildService : Service() {
         val dir = intent?.getStringExtra(EXTRA_DATASET) ?: run { stopSelf(); return START_NOT_STICKY }
         val iters = intent.getIntExtra(EXTRA_ITERS, 3000)
         val maxRes = intent.getIntExtra(EXTRA_MAXRES, 1920)
+        val trainer = intent.getStringExtra(EXTRA_TRAINER) ?: "brush"
 
         startForeground(NOTIF_ID, notification("Building your 3D scan…"))
 
@@ -66,7 +67,7 @@ class CloudBuildService : Service() {
         val baseUrl = Settings.backendUrl(this)
         running[dir] = scope.launch {
             try {
-                CloudBuild.build(File(dir), iters, maxRes, baseUrl) { p ->
+                CloudBuild.build(File(dir), iters, maxRes, baseUrl, trainer) { p ->
                     setJob(dir, JobState(p.phase, p.pct, p.iter, p.total, p.elapsed, jobId = p.jobId))
                 }
                 setJob(dir, JobState("Done", done = true))
@@ -140,6 +141,7 @@ class CloudBuildService : Service() {
         const val EXTRA_DATASET = "dataset"
         const val EXTRA_ITERS = "iters"
         const val EXTRA_MAXRES = "maxres"
+        const val EXTRA_TRAINER = "trainer"
         const val ACTION_CANCEL = "com.teapotlab.rumahku.CANCEL_CLOUD_BUILD"
         private const val CHANNEL_ID = "cloud_build"
         private const val NOTIF_ID = 43
@@ -147,11 +149,12 @@ class CloudBuildService : Service() {
         /** Live per-scan build state, observed by the home + progress screens. */
         val jobs = MutableStateFlow<Map<String, JobState>>(emptyMap())
 
-        fun start(context: Context, scanDir: String, iters: Int, maxRes: Int) {
+        fun start(context: Context, scanDir: String, iters: Int, maxRes: Int, trainer: String = "brush") {
             val i = Intent(context, CloudBuildService::class.java)
                 .putExtra(EXTRA_DATASET, scanDir)
                 .putExtra(EXTRA_ITERS, iters)
                 .putExtra(EXTRA_MAXRES, maxRes)
+                .putExtra(EXTRA_TRAINER, trainer)
             ContextCompat.startForegroundService(context, i)
         }
 

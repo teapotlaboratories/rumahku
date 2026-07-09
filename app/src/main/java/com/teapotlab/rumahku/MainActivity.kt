@@ -327,6 +327,9 @@ private fun HomeScreen() {
                     QualityOption("Cloud · High", "6000 iters · best quality") {
                         launchCloudBuild(context, s, 6000, 1600); buildScan = null
                     }
+                    QualityOption("Cloud · Splatfacto", "experimental · pose-optimized") {
+                        launchCloudBuild(context, s, 15000, 1600, trainer = "splatfacto"); buildScan = null
+                    }
                     QualityOption("On-device", "2000 iters · offline, slower") {
                         launchBuild(context, s, 2000); buildScan = null
                     }
@@ -408,10 +411,12 @@ private fun launchBuild(context: Context, scan: Scan, iters: Int) {
     )
 }
 
-private fun launchCloudBuild(context: Context, scan: Scan, iters: Int, maxRes: Int) {
+private fun launchCloudBuild(
+    context: Context, scan: Scan, iters: Int, maxRes: Int, trainer: String = "brush",
+) {
     // Start the background build (idempotent for an already-building scan), then
     // open the watch screen. Leaving that screen keeps the build running.
-    CloudBuildService.start(context, scan.dir.absolutePath, iters, maxRes)
+    CloudBuildService.start(context, scan.dir.absolutePath, iters, maxRes, trainer)
     context.startActivity(
         Intent(context, CloudBuildActivity::class.java)
             .putExtra(CloudBuildActivity.EXTRA_DATASET, scan.dir.absolutePath)
