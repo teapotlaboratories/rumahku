@@ -3,19 +3,24 @@
 See `README.md` for the project overview.
 
 ## Focus: reconstruction quality
-The cloud pipeline is fast + measured (PSNR/SSIM) but the splats look weak
-(~21 dB @ 2k iters; good splats are 25–35+). Improve quality — see the notes
-being gathered in `docs/` and the leading hypotheses:
+Measured (295-image scene, 1080px, PSNR on held-out views):
+- Raw ARCore poses: 23.3 @15k, 23.8 @30k (plateaus — more iters don't help).
+- COLMAP pose-prior refine (all 295 registered): **24.7 @15k** (+1.4 dB).
 
-- [ ] **Pose accuracy** — we feed Brush raw ARCore VIO poses (not SfM-refined).
-      Splatting is very pose-sensitive; this is the top suspect. Try Brush's
-      camera/pose optimization during training, and/or a COLMAP refinement pass.
-- [ ] **More iters / higher res** — now that the GPU is fast, push iters + res
-      and watch PSNR vs. iters to find the real ceiling.
-- [ ] **Capture coverage** — ensure enough overlapping views per surface; the
-      gate keeps sharp frames but coverage/overlap may be thin.
-- [ ] **Intrinsics / camera model** — verify focal + principal point; phone wide
-      lenses have distortion a pinhole model doesn't capture.
+**Conclusion: pose refinement helps modestly (~+1.5 dB) but capture quality is
+the real ceiling** ("capture is ~80% of quality" per the tuning guide).
+
+- [x] More iters / higher res — tested; PSNR plateaus ~24 (not the fix).
+- [x] Pose accuracy — COLMAP pose-prior refine = +1.4 dB (worth banking).
+- **Capture quality (biggest lever) — in progress:**
+  - [x] Fixed focus (no refocus blur, stable intrinsics).
+  - [x] Denser keyframes (7 cm / 8°) for ~70–80% overlap.
+  - [ ] **Lock AE/AWB** — needs `SharedCamera` (ARCore + Camera2) to set
+        `CONTROL_AE_LOCK`/`CONTROL_AWB_LOCK`; photometric consistency matters.
+  - [ ] Capture-technique guidance UX (perimeter orbit, multi-height, loop closure).
+- [ ] **Productionize pose-prior refinement** in the backend (COLMAP pose-prior
+      or GLOMAP with ARCore priors + relaxed triangulation) — banked +1.5 dB.
+- [ ] Intrinsics / lens distortion (OPENCV camera model vs pinhole).
 
 ## Backlog
 ### Backend → cloud GPU

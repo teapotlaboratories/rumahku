@@ -213,7 +213,9 @@ class CaptureActivity : ComponentActivity() {
 
     private fun configureSession(session: Session) {
         val config = Config(session).apply {
-            focusMode = Config.FocusMode.AUTO
+            // Fixed focus: no autofocus hunting (refocus blur) and stable camera
+            // intrinsics across frames — both matter a lot for 3DGS/SfM quality.
+            focusMode = Config.FocusMode.FIXED
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             // Depth-from-motion powers the Polycam-style coverage overlay
             // (TsdfVolume). Degrade gracefully where it isn't supported.

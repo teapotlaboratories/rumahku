@@ -288,8 +288,10 @@ class CaptureSession(
 
     companion object {
         private const val TAG = "rumahku-capture-session"
-        private const val MIN_TRANSLATION_M = 0.10f          // 10 cm
-        private val MIN_ROTATION_RAD = Math.toRadians(12.0).toFloat()
+        // Keyframe spacing — kept dense for high frame-to-frame overlap (~70-80%),
+        // which SfM/3DGS quality depends on. Denser = more views per surface.
+        private const val MIN_TRANSLATION_M = 0.07f          // 7 cm
+        private val MIN_ROTATION_RAD = Math.toRadians(8.0).toFloat()
         private const val TRACKING_WARMUP_FRAMES = 30        // ~1 s of stable tracking before capturing
         private const val MAX_FRAME_JUMP_M = 0.30f           // single-frame move above this = tracking glitch
         private const val MIN_POINT_CONFIDENCE = 0.3f        // drop low-confidence ARCore feature points from the seed
