@@ -174,6 +174,16 @@ class CaptureSession(
             val height = image.height
             val nv21 = YuvUtil.toNv21(image)
 
+            // Reject blurry keyframes. The motion gate lets through frames that
+            // are still soft (rolling shutter, low light, refocus); the variance
+            // of the Laplacian over the luma is a standard sharpness metric —
+            // higher = sharper. Blurry input = blurry splat, so we drop them.
+            val sharp = sharpness(nv21, width, height)
+            if (sharp < MIN_SHARPNESS) {
+                Log.d(TAG, "reject blurry keyframe sharpness=%.0f".format(sharp))
+                return
+            }
+
             val matrix = FloatArray(16)
             pose.toMatrix(matrix, 0)
 
@@ -221,6 +231,36 @@ class CaptureSession(
         return sqrt(dx * dx + dy * dy + dz * dz)
     }
 
+    /**
+     * Variance of the Laplacian over the luma (NV21 Y plane) — a standard image
+     * sharpness / blur metric. Higher = sharper. Computed over a subsampled
+     * central region for speed (edges are noisy / often out of focus).
+     */
+    private fun sharpness(nv21: ByteArray, w: Int, h: Int): Double {
+        val x0 = w / 5; val x1 = w * 4 / 5
+        val y0 = h / 5; val y1 = h * 4 / 5
+        var sum = 0.0; var sumSq = 0.0; var n = 0
+        var y = y0
+        while (y < y1) {
+            val row = y * w
+            var x = x0
+            while (x < x1) {
+                val c = nv21[row + x].toInt() and 0xFF
+                val up = nv21[row - w + x].toInt() and 0xFF
+                val dn = nv21[row + w + x].toInt() and 0xFF
+                val lf = nv21[row + x - 1].toInt() and 0xFF
+                val rt = nv21[row + x + 1].toInt() and 0xFF
+                val lap = (4 * c - up - dn - lf - rt).toDouble()
+                sum += lap; sumSq += lap * lap; n++
+                x += SHARP_STEP
+            }
+            y += SHARP_STEP
+        }
+        if (n == 0) return 0.0
+        val mean = sum / n
+        return sumSq / n - mean * mean
+    }
+
     /** Angle between two poses' orientations, in radians. */
     private fun rotationRadiansBetween(a: Pose, b: Pose): Float {
         val qa = FloatArray(4).also { a.getRotationQuaternion(it, 0) }
@@ -239,6 +279,9 @@ class CaptureSession(
         private const val MIN_POINT_CONFIDENCE = 0.3f        // drop low-confidence ARCore feature points from the seed
         private const val DEPTH_EVERY_N = 2                  // sample the depth map every Nth stable frame
         private const val DEPTH_STRIDE = 2                   // depth subsample fed into TSDF fusion
+        private const val SHARP_STEP = 2                     // subsample stride for the sharpness metric
+        private const val MIN_SHARPNESS = 55.0               // reject keyframes blurrier than this
+                                                             // (calibrated: blurry ≤25, sharp 41+, gap at 25–41)
         // Sharpness gate — capture only when moving slower than this (blur guard).
         private const val MAX_STILL_LIN_VEL = 0.12f          // m/s
         private val MAX_STILL_ANG_VEL = Math.toRadians(18.0).toFloat()  // rad/s
