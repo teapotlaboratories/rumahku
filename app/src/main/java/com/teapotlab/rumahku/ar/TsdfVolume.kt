@@ -36,6 +36,9 @@ class TsdfVolume {
     // concatenation of these; re-meshing a cube overwrites its entry.
     private val cubeTris = HashMap<Long, FloatArray>()
     private val dirty = HashSet<Long>()
+    // Voxels touched in the CURRENT keyframe — so weight counts distinct views
+    // (keyframes), not repeat pixel hits within one frame. Cleared per integrate.
+    private val frameTouched = HashSet<Long>()
     private var cachedVertCount = 0
     // Snapshot cache: rebuilt only when the mesh changed (not every render frame).
     private var snapshotStale = true
@@ -43,11 +46,18 @@ class TsdfVolume {
 
     /** Fuse one keyframe (its depth + [nv21] camera image) into the field. */
     fun integrate(frame: Frame, nv21: ByteArray, camW: Int, camH: Int, stride: Int) {
+        // Raw (measured, un-extrapolated) ARCore depth + per-pixel confidence:
+        // sparse but metrically accurate — only confident pixels are fused.
         val depth = try {
-            frame.acquireDepthImage16Bits()
+            frame.acquireRawDepthImage16Bits()
         } catch (e: NotYetAvailableException) {
             return
         } ?: return
+        val conf = try {
+            frame.acquireRawDepthConfidenceImage()
+        } catch (e: Exception) {
+            null
+        }
 
         try {
             val dw = depth.width
@@ -55,65 +65,35 @@ class TsdfVolume {
             val plane = depth.planes[0]
             val buf = plane.buffer.order(ByteOrder.nativeOrder())
             val rowStride = plane.rowStride
+            val cBuf = conf?.planes?.get(0)?.buffer
+            val cRowStride = conf?.planes?.get(0)?.rowStride ?: 0
 
             val intr = frame.camera.imageIntrinsics
             val fl = intr.focalLength
             val pp = intr.principalPoint
             val dims = intr.imageDimensions
             if (dims[0] == 0 || dims[1] == 0) return
-            val sxr = dw.toFloat() / dims[0]
-            val syr = dh.toFloat() / dims[1]
-            val fx = fl[0] * sxr; val fy = fl[1] * syr
-            val cx = pp[0] * sxr; val cy = pp[1] * syr
+            val fx = fl[0]; val fy = fl[1]; val px = pp[0]; val py = pp[1] // camera intrinsics
 
             val m = FloatArray(16)
             frame.camera.pose.toMatrix(m, 0)  // camera→world, column-major
-            val camPosX = m[12]; val camPosY = m[13]; val camPosZ = m[14]
             val ySize = camW * camH
 
             synchronized(lock) {
+                frameTouched.clear()
                 var v = 0
                 while (v < dh) {
                     val rowBase = v * rowStride
                     var u = 0
                     while (u < dw) {
                         val mm = buf.getShort(rowBase + u * 2).toInt() and 0xFFFF
-                        if (mm != 0) {
+                        val cok = cBuf == null ||
+                            (cBuf.get(v * cRowStride + u).toInt() and 0xFF) >= CONF_MIN
+                        if (mm != 0 && cok) {
                             val z = mm / 1000f
                             if (z in MIN_M..MAX_M) {
-                                // Surface point in world space.
-                                val lx = (u - cx) * z / fx
-                                val ly = -(v - cy) * z / fy
-                                val lz = -z
-                                val sxw = m[0] * lx + m[4] * ly + m[8] * lz + m[12]
-                                val syw = m[1] * lx + m[5] * ly + m[9] * lz + m[13]
-                                val szw = m[2] * lx + m[6] * ly + m[10] * lz + m[14]
-                                // View ray (camera → surface), unit length.
-                                var rx = sxw - camPosX; var ry = syw - camPosY; var rz = szw - camPosZ
-                                val d = sqrt(rx * rx + ry * ry + rz * rz)
-                                if (d < 1e-3f) { u += stride; continue }
-                                rx /= d; ry /= d; rz /= d
-                                // Colour at the matching camera pixel.
-                                val uc = (u.toFloat() * camW / dw).toInt().coerceIn(0, camW - 1)
-                                val vc = (v.toFloat() * camH / dh).toInt().coerceIn(0, camH - 1)
-                                val yv = nv21[vc * camW + uc].toInt() and 0xFF
-                                val uvB = ySize + (vc / 2) * camW + (uc and 1.inv())
-                                val vv = (nv21[uvB].toInt() and 0xFF) - 128
-                                val uu = (nv21[uvB + 1].toInt() and 0xFF) - 128
-                                val cr = (yv + 1.402f * vv).coerceIn(0f, 255f) / 255f
-                                val cg = (yv - 0.344f * uu - 0.714f * vv).coerceIn(0f, 255f) / 255f
-                                val cb = (yv + 1.772f * uu).coerceIn(0f, 255f) / 255f
-                                // Update voxels in the truncation band along the ray.
-                                var t = d - TRUNC_M
-                                val tEnd = d + TRUNC_M
-                                while (t <= tEnd) {
-                                    val wxp = camPosX + rx * t
-                                    val wyp = camPosY + ry * t
-                                    val wzp = camPosZ + rz * t
-                                    val sdf = ((d - t) / TRUNC_M).coerceIn(-1f, 1f)
-                                    updateVoxel(wxp, wyp, wzp, sdf, cr, cg, cb)
-                                    t += VOXEL_M
-                                }
+                                fuseSample(u.toFloat() * camW / dw, v.toFloat() * camH / dh, z,
+                                    m, fx, fy, px, py, nv21, camW, camH, ySize)
                             }
                         }
                         u += stride
@@ -124,6 +104,46 @@ class TsdfVolume {
             }
         } finally {
             depth.close()
+            conf?.close()
+        }
+    }
+
+    /**
+     * Unproject a camera pixel (cpx,cpy) at metric depth [d] to world space,
+     * colour it from [nv21], and run a ray-band TSDF update around the surface.
+     * Camera basis is ARCore's (+Y up, −Z forward).
+     */
+    private fun fuseSample(
+        cpx: Float, cpy: Float, d: Float, m: FloatArray,
+        fx: Float, fy: Float, px: Float, py: Float,
+        nv21: ByteArray, camW: Int, camH: Int, ySize: Int,
+    ) {
+        val lx = (cpx - px) * d / fx
+        val ly = -(cpy - py) * d / fy
+        val lz = -d
+        val sxw = m[0] * lx + m[4] * ly + m[8] * lz + m[12]
+        val syw = m[1] * lx + m[5] * ly + m[9] * lz + m[13]
+        val szw = m[2] * lx + m[6] * ly + m[10] * lz + m[14]
+        val ox = m[12]; val oy = m[13]; val oz = m[14]
+        var rx = sxw - ox; var ry = syw - oy; var rz = szw - oz
+        val dist = sqrt(rx * rx + ry * ry + rz * rz)
+        if (dist < 1e-3f) return
+        rx /= dist; ry /= dist; rz /= dist
+        val uc = cpx.toInt().coerceIn(0, camW - 1)
+        val vc = cpy.toInt().coerceIn(0, camH - 1)
+        val yv = nv21[vc * camW + uc].toInt() and 0xFF
+        val uvB = ySize + (vc / 2) * camW + (uc and 1.inv())
+        val vv = (nv21[uvB].toInt() and 0xFF) - 128
+        val uu = (nv21[uvB + 1].toInt() and 0xFF) - 128
+        val cr = (yv + 1.402f * vv).coerceIn(0f, 255f) / 255f
+        val cg = (yv - 0.344f * uu - 0.714f * vv).coerceIn(0f, 255f) / 255f
+        val cb = (yv + 1.772f * uu).coerceIn(0f, 255f) / 255f
+        var t = dist - TRUNC_M
+        val tEnd = dist + TRUNC_M
+        while (t <= tEnd) {
+            updateVoxel(ox + rx * t, oy + ry * t, oz + rz * t,
+                ((dist - t) / TRUNC_M).coerceIn(-1f, 1f), cr, cg, cb)
+            t += VOXEL_M
         }
     }
 
@@ -133,6 +153,9 @@ class TsdfVolume {
         val iy = floor(wy / VOXEL_M).toInt()
         val iz = floor(wz / VOXEL_M).toInt()
         val key = voxelKey(ix, iy, iz)
+        // Count this voxel at most once per keyframe → weight = number of views
+        // that saw it (Polycam-style viewpoint diversity), not repeat pixel hits.
+        if (!frameTouched.add(key)) return
         val vox = voxels.getOrPut(key) { FloatArray(5) }
         val w = vox[1]
         val nw = (w + 1f).coerceAtMost(WMAX)
@@ -178,17 +201,24 @@ class TsdfVolume {
      * observed / has no surface crossing.
      */
     private fun polygoniseCube(ix: Int, iy: Int, iz: Int): FloatArray? {
-        // Gather the 8 corners; bail if any is unobserved (frontier).
+        // Gather the 8 corners; bail unless each has been seen from enough views
+        // (MIN_CAPTURE_WEIGHT) — so a single grazing glimpse doesn't count as
+        // "captured". The least-seen corner sets the cube's confidence.
         var cubeIndex = 0
+        var minW = Float.MAX_VALUE
         for (i in 0 until 8) {
             val cx = ix + CORNER[i * 3]
             val cy = iy + CORNER[i * 3 + 1]
             val cz = iz + CORNER[i * 3 + 2]
             val vox = voxels[voxelKey(cx, cy, cz)] ?: return null
-            if (vox[1] < 1f) return null
+            val w = vox[1]
+            if (w < MIN_CAPTURE_WEIGHT) return null
+            if (w < minW) minW = w
             cval[i] = vox[0]
             ccr[i] = vox[2]; ccg[i] = vox[3]; ccb[i] = vox[4]
         }
+        // Confidence 0→1 as the cube goes from just-captured to well-observed.
+        curConf = ((minW - MIN_CAPTURE_WEIGHT) / FADE_RANGE).coerceIn(0f, 1f)
         for (i in 0 until 8) if (cval[i] < ISO) cubeIndex = cubeIndex or (1 shl i)
         val edges = EDGE_TABLE[cubeIndex]
         if (edges == 0) return null
@@ -236,7 +266,12 @@ class TsdfVolume {
 
     private fun appendEdgeVert(out: FloatArray, o: Int, e: Int, bx: Float, by: Float) {
         out[o] = ex[e]; out[o + 1] = ey[e]; out[o + 2] = ez[e]
-        out[o + 3] = er[e]; out[o + 4] = eg[e]; out[o + 5] = eb[e]
+        // Fade from the low-confidence tint to the true colour as confidence rises,
+        // so thinly-scanned surface reads "keep scanning here".
+        val t = curConf
+        out[o + 3] = LOWCONF_R + (er[e] - LOWCONF_R) * t
+        out[o + 4] = LOWCONF_G + (eg[e] - LOWCONF_G) * t
+        out[o + 5] = LOWCONF_B + (eb[e] - LOWCONF_B) * t
         out[o + 6] = bx; out[o + 7] = by
     }
 
@@ -258,11 +293,12 @@ class TsdfVolume {
     fun triangleCount(): Int = synchronized(lock) { cachedVertCount / 3 }
 
     fun clear() = synchronized(lock) {
-        voxels.clear(); cubeTris.clear(); dirty.clear(); cachedVertCount = 0
-        cachedSnapshot = FloatArray(0); snapshotStale = false
+        voxels.clear(); cubeTris.clear(); dirty.clear(); frameTouched.clear()
+        cachedVertCount = 0; cachedSnapshot = FloatArray(0); snapshotStale = false
     }
 
     // Scratch (single-threaded under lock) for one cube's marching-cubes pass.
+    private var curConf = 1f          // confidence of the cube being polygonised
     private val cval = FloatArray(8)
     private val ccr = FloatArray(8); private val ccg = FloatArray(8); private val ccb = FloatArray(8)
     private val ex = FloatArray(12); private val ey = FloatArray(12); private val ez = FloatArray(12)
@@ -280,11 +316,21 @@ class TsdfVolume {
 
     companion object {
         const val VERT_FLOATS = 8          // x,y,z,r,g,b,bx,by
-        private const val VOXEL_M = 0.03f  // 3 cm voxels
-        private const val TRUNC_M = 0.06f  // truncation band (± around surface)
+        private const val VOXEL_M = 0.04f  // 4 cm voxels (coarser → more continuous)
+        private const val TRUNC_M = 0.09f  // truncation band (± around surface)
         private const val MIN_M = 0.3f
         private const val MAX_M = 4.0f
         private const val WMAX = 40f       // cap running weight
+        private const val CONF_MIN = 100   // raw-depth confidence gate (0..255)
+        // "Captured" = a cube's corners each seen from at least this many
+        // keyframes; confidence then ramps to full colour over FADE_RANGE more.
+        private const val MIN_CAPTURE_WEIGHT = 3f
+        private const val FADE_RANGE = 5f
+        // Low-confidence tint (neutral cool-grey "clay") for just-captured surface
+        // — fades to the true camera colour as the area is observed from more views.
+        private const val LOWCONF_R = 0.58f
+        private const val LOWCONF_G = 0.64f
+        private const val LOWCONF_B = 0.72f
         private const val ISO = 0f         // surface = TSDF zero-crossing
         private const val BIAS = 0x100000  // +2^20 so negative coords pack unsigned
         private const val COORD_MASK = 0x1FFFFFL // 21 bits/axis
