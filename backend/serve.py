@@ -48,6 +48,9 @@ MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
 # (the home is a shared mount) and the host's NVIDIA Vulkan drives the GPU.
 # Set HOST_EXEC="" to force in-container execution.
 HOST_EXEC = os.environ.get("HOST_EXEC", shutil.which("distrobox-host-exec") or "")
+# nerfstudio (Splatfacto/gsplat) runs from its official Docker image on the GPU
+# via podman — it has CUDA + gsplat prebuilt, avoiding an in-container install.
+NERF_IMAGE = os.environ.get("NERF_IMAGE", "ghcr.io/nerfstudio-project/nerfstudio:latest")
 os.makedirs(JOBS_DIR, exist_ok=True)
 
 JOBS = {}            # job_id -> {state, queued_at, started, iter, total, error, ply}
@@ -61,14 +64,17 @@ def _worker():
     """Pull queued jobs and train them one at a time (per worker), so many
     concurrent uploads don't thrash the GPU — they queue instead."""
     while True:
-        job_id, ds_dir, iters, max_res, eval_split = WORK_Q.get()
+        job_id, ds_dir, iters, max_res, eval_split, trainer = WORK_Q.get()
         try:
             with LOCK:
                 j = JOBS.get(job_id)
                 if j is None or j.get("state") in ("error", "cancelled"):
                     continue  # gone/cancelled while queued
                 j.update(state="running", started=time.time())
-            _run_job(job_id, ds_dir, iters, max_res, eval_split)
+            if trainer == "splatfacto":
+                _run_splatfacto(job_id, ds_dir, iters, max_res, eval_split)
+            else:
+                _run_job(job_id, ds_dir, iters, max_res, eval_split)
         finally:
             WORK_Q.task_done()
 
@@ -137,6 +143,50 @@ def _run_job(job_id: str, ds_dir: str, iters: int, max_res: int, eval_split: int
             JOBS[job_id].update(state="error", error=f"exit {rc}; {tail}")
 
 
+def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_split: int = 0):
+    """Train with nerfstudio Splatfacto (gsplat) in the official Docker image on
+    the GPU (podman --gpus). Trains from the nerfstudio dataset (transforms.json)
+    and exports a .ply. CUDA works in a CDI/--gpus container (unlike Vulkan)."""
+    out_dir = os.path.join(ds_dir, "ns_out")
+    log_path = os.path.join(ds_dir, "brush.log")   # shared log path (status polls it)
+    os.makedirs(out_dir, exist_ok=True)
+    inner = (
+        "set -e; "
+        f"ns-train splatfacto --data /ws --output-dir /ws/ns_out "
+        f"--max-num-iterations {iters} --viewer.quit-on-train-completion True "
+        f"--pipeline.model.cull_alpha_thresh 0.005 "
+        f"nerfstudio-data --downscale-factor 1 --eval-mode fraction; "
+        "CFG=$(find /ws/ns_out -name config.yml | head -1); "
+        "ns-export gaussian-splat --load-config \"$CFG\" --output-dir /ws/ns_out/export"
+    )
+    podman = [
+        "podman", "run", "--rm", "--gpus", "all", "--security-opt=label=disable",
+        "-v", f"{ds_dir}:/ws", NERF_IMAGE, "bash", "-lc", inner,
+    ]
+    cmd = ([HOST_EXEC] if HOST_EXEC else []) + podman
+    try:
+        with open(log_path, "wb") as lf:
+            proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=ds_dir)
+        with LOCK:
+            JOBS[job_id]["proc"] = proc
+        while proc.poll() is None:
+            time.sleep(2.0)
+            _update_iter(job_id, log_path)   # best-effort progress/PSNR from the log
+        rc = proc.returncode
+    except Exception as e:  # noqa: BLE001
+        with LOCK:
+            JOBS[job_id].update(state="error", error=f"splatfacto spawn: {e}")
+        return
+    plys = sorted(glob.glob(os.path.join(out_dir, "export", "*.ply")))
+    with LOCK:
+        if JOBS[job_id].get("state") == "cancelled":
+            pass
+        elif rc == 0 and plys:
+            JOBS[job_id].update(state="done", ply=plys[-1], iter=iters)
+        else:
+            JOBS[job_id].update(state="error", error=f"splatfacto exit {rc}; {_log_tail(log_path)}")
+
+
 def _update_iter(job_id: str, log_path: str):
     try:
         with open(log_path, "rb") as f:
@@ -187,6 +237,7 @@ class Handler(BaseHTTPRequestHandler):
         iters = int(q.get("iters", ["2000"])[0])
         max_res = int(q.get("max_res", ["1024"])[0])
         eval_split = int(q.get("eval_split", ["0"])[0])   # hold out every Nth view for PSNR
+        trainer = q.get("trainer", ["brush"])[0]          # brush | splatfacto
         n = int(self.headers.get("Content-Length", "0"))
         if n <= 0:
             return self._json(400, {"error": "empty body (expected dataset.zip)"})
@@ -203,8 +254,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "no transforms.json in upload"})
         with LOCK:
             JOBS[job_id] = {"state": "queued", "queued_at": time.time(),
-                            "started": None, "iter": 0, "total": iters}
-        WORK_Q.put((job_id, root, iters, max_res, eval_split))
+                            "started": None, "iter": 0, "total": iters, "trainer": trainer}
+        WORK_Q.put((job_id, root, iters, max_res, eval_split, trainer))
         self._json(200, {"job_id": job_id})
 
     def do_GET(self):
