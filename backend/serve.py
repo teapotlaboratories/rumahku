@@ -249,18 +249,33 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
     # part of the nerfstudio image).
     with open(os.path.join(ds_dir, "_prep.py"), "w") as pf:
         pf.write(_SPLAT_PREP_PY)
-    # ns-train, then ns-eval for a held-out PSNR/SSIM, then export the .ply.
-    # Splatfacto's viewer path skips eval during training and its console never
-    # prints eval PSNR (it goes to tensorboard), so we can't stream PSNR like
-    # Brush does — instead ns-eval computes it once at the end into metrics.json,
-    # which we parse below. `|| true` keeps a metrics hiccup from failing the build.
+    # Quality config, validated by an A/B sweep on real captures (opacity 0.26 ->
+    # 0.98, i.e. hazy translucent splat -> solid):
+    #  - 30k iters: splatfacto's schedule is 30k-tuned; stop_split_at defaults to
+    #    15000, so stopping at 15k densifies to the last step and SKIPS the whole
+    #    settle/refine phase where opacities sharpen — the direct cause of the
+    #    hazy, semi-transparent look. The app requests 15k, so we floor it to 30k.
+    #  - use-bilateral-grid: absorbs per-frame auto-exposure/AWB drift so Gaussians
+    #    go opaque instead of translucent-averaging conflicting exposures.
+    #  - color-corrected-metrics: the grid is train-only, so held-out PSNR needs an
+    #    affine colour match to be meaningful (reports cc_psnr).
+    #  - default cull_alpha_thresh (0.1): the old 0.005 kept translucent floaters.
+    #  - NO camera-optimizer: it drifts the already-good ARCore poses and only hurt.
+    #  - load-3D-points: guarantees the ARCore seed.ply init (vs random 50k).
+    # ns-eval computes a held-out PSNR/SSIM into metrics.json; then export the .ply.
+    # `|| true` keeps a metrics hiccup from failing the build.
+    sf_iters = max(iters, 30000)
     inner = (
         "set -e; "
         f"python3 /ws/_prep.py {max_res}; "
         f"ns-train splatfacto --data /ws --output-dir /ws/ns_out "
-        f"--max-num-iterations {iters} --viewer.quit-on-train-completion True "
-        f"--pipeline.model.cull_alpha_thresh 0.005 "
-        f"nerfstudio-data --downscale-factor 1 --eval-mode fraction; "
+        f"--max-num-iterations {sf_iters} --viewer.quit-on-train-completion True "
+        f"--pipeline.model.use-bilateral-grid True "
+        f"--pipeline.model.color-corrected-metrics True "
+        f"--pipeline.model.use-scale-regularization True "
+        f"--pipeline.model.rasterize-mode antialiased "
+        f"--pipeline.model.densify-grad-thresh 0.0006 "
+        f"nerfstudio-data --downscale-factor 1 --load-3D-points True --eval-mode fraction; "
         "CFG=$(find /ws/ns_out -name config.yml | head -1); "
         "ns-eval --load-config \"$CFG\" --output-path /ws/ns_out/metrics.json || true; "
         "ns-export gaussian-splat --load-config \"$CFG\" --output-dir /ws/ns_out/export"
@@ -303,11 +318,16 @@ def _read_ns_metrics(job_id: str, metrics_path: str):
     try:
         with open(metrics_path) as f:
             res = json.load(f).get("results", {})
+        # Prefer the colour-corrected metrics: with the bilateral grid (train-only),
+        # raw held-out PSNR is exposure-penalised; cc_psnr is the meaningful, fair
+        # number. Falls back to raw psnr/ssim when cc_* isn't present.
+        psnr = res.get("cc_psnr", res.get("psnr"))
+        ssim = res.get("cc_ssim", res.get("ssim"))
         with LOCK:
-            if res.get("psnr") is not None:
-                JOBS[job_id]["psnr"] = float(res["psnr"])
-            if res.get("ssim") is not None:
-                JOBS[job_id]["ssim"] = float(res["ssim"])
+            if psnr is not None:
+                JOBS[job_id]["psnr"] = float(psnr)
+            if ssim is not None:
+                JOBS[job_id]["ssim"] = float(ssim)
     except (OSError, ValueError, TypeError):
         pass
 
