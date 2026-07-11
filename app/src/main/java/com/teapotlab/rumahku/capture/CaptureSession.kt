@@ -115,9 +115,13 @@ class CaptureSession(
         val featureSeed = seedPointCloud.snapshot()
         val depthSeed = tsdf.surfaceSeed(MAX_DEPTH_SEED_POINTS)
         val combined = if (depthSeed.isEmpty()) featureSeed else featureSeed + depthSeed
+        // Snapshot the live mesh now (capturing=false, so it's stable) and persist
+        // it so the scan's 3D map is reviewable offline (MeshViewerActivity).
+        val meshVerts = tsdf.snapshot()
         executor?.execute {
             w?.finish(intr, combined, altSeedName = "seed_features.ply", altSeedPoints = featureSeed,
                 imageW = highResW, imageH = highResH)
+            w?.writeMesh(meshVerts)
         }
         executor?.shutdown()
         Log.i(TAG, "capture stopped: $keyframeCount keyframes, " +

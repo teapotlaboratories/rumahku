@@ -22,8 +22,8 @@ android {
         applicationId = "com.teapotlab.rumahku"
         minSdk = 26          // ARCore needs 24+; 26 also gives us adaptive icons.
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.3.1"
+        versionCode = 5
+        versionName = "0.3.2"
 
         // ── Native (NDK) build ────────────────────────────────────────────────
         // Only build for the 64-bit ARM ABI. The Samsung S25 (Snapdragon 8 Elite)

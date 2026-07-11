@@ -47,7 +47,7 @@ import com.google.ar.core.exceptions.CameraNotAvailableException
  *   → onConfigured → setRepeatingRequest → onActive → session.resume().
  * The GL renderer keeps calling session.update() as before.
  */
-enum class ExposureMode { ADAPTIVE, LOCK }
+enum class ExposureMode { ADAPTIVE, LOCK, LOCK_INITIAL }
 
 class SharedCameraController(
     context: Context,
@@ -225,11 +225,17 @@ class SharedCameraController(
         b.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
         b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
         b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-        b.set(CaptureRequest.CONTROL_AWB_LOCK, false)
-        if (MODE == ExposureMode.ADAPTIVE) {
+        if (MODE == ExposureMode.ADAPTIVE || MODE == ExposureMode.LOCK_INITIAL) {
             // Cap max exposure fast; AE compensates with ISO instead of blur/dark.
             fastestFps?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
         }
+        // LOCK_INITIAL (M1b spike): freeze AE + AWB in the INITIAL request — no
+        // mid-session setRepeatingRequest re-issue, which is what broke depth in
+        // LOCK. Locks to the first-frame auto value (metering is a later refinement);
+        // the point of the spike is whether depth-from-motion survives this.
+        val lock = MODE == ExposureMode.LOCK_INITIAL
+        b.set(CaptureRequest.CONTROL_AE_LOCK, lock)
+        b.set(CaptureRequest.CONTROL_AWB_LOCK, lock)
     }
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -327,6 +333,14 @@ class SharedCameraController(
         // in shared-camera mode that BREAKS ARCore's depth-from-motion (→ the live
         // mesh + depth seed silently die). Do not enable LOCK without first moving
         // its settings into the initial request. Confirmed on Pixel 6, 2026-07.
+        // ADAPTIVE is the shipping default (auto-exposure with a fast-shutter cap;
+        // depth-safe). Two locked variants exist for the future quality photo-pass
+        // mode (see docs/design/quality-capture-mode.md):
+        //  - LOCK        — mid-session freeze; M1 spike confirmed it keeps tracking
+        //                  but BREAKS depth-from-motion (live mesh dies). Pixel 6.
+        //  - LOCK_INITIAL — freezes AE/AWB in the INITIAL request (no re-issue);
+        //                  M1b, not yet validated on-device (does depth survive?).
+        // Do not ship a locked mode as default until M1b is confirmed.
         val MODE = ExposureMode.ADAPTIVE
         private const val METER_MS = 1200L               // auto-meter this long before locking (LOCK mode)
         private const val FAST_SHUTTER_NS = 8_000_000L   // 1/125 s target shutter

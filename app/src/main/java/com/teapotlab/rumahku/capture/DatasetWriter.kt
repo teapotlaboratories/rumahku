@@ -9,6 +9,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * Writes a capture session to disk in the "transforms.json" convention used by
@@ -165,10 +167,29 @@ class DatasetWriter(private val sessionDir: File) {
         return rows
     }
 
+    /** Persists the live TSDF mesh (world-space triangle soup, 8 floats/vertex:
+     *  x,y,z,r,g,b,bx,by) so a scan's 3D map can be reviewed offline — no cloud
+     *  build. Format: little-endian [int32 floatCount][float32 × floatCount].
+     *  Skipped for empty meshes (e.g. depth-less locked-exposure captures). */
+    fun writeMesh(verts: FloatArray) {
+        if (verts.size < VERT_FLOATS * 3) return   // need at least one triangle
+        try {
+            val bb = ByteBuffer.allocate(4 + verts.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+            bb.putInt(verts.size)
+            bb.asFloatBuffer().put(verts)
+            FileOutputStream(File(sessionDir, MESH_NAME)).use { it.write(bb.array()) }
+            Log.i(TAG, "wrote mesh: ${verts.size / VERT_FLOATS} verts")
+        } catch (e: Exception) {
+            Log.e(TAG, "failed to write mesh", e)
+        }
+    }
+
     companion object {
         private const val TAG = "rumahku-writer"
         private const val JPEG_QUALITY = 95
         private const val SEED_PLY_NAME = "seed.ply"
+        const val MESH_NAME = "mesh.f32"
+        private const val VERT_FLOATS = 8        // x,y,z,r,g,b,bx,by (matches TsdfVolume)
         private const val MIN_SEED_POINTS = 50   // below this the seed isn't worth it
     }
 }
