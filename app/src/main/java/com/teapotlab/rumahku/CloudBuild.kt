@@ -37,7 +37,7 @@ object CloudBuild {
      */
     suspend fun build(
         scanDir: File, iters: Int, maxRes: Int, baseUrl: String, trainer: String = "brush",
-        onProgress: (Progress) -> Unit,
+        refine: String = "", onProgress: (Progress) -> Unit,
     ): File = withContext(Dispatchers.IO) {
         onProgress(Progress("Packaging"))
         val zip = File(scanDir.parentFile, "${scanDir.name}_upload.zip")
@@ -45,23 +45,42 @@ object CloudBuild {
             zipDataset(scanDir, zip)
 
             onProgress(Progress("Uploading", pct = 0))
-            val jobId = postJob(zip, iters, maxRes, baseUrl, trainer) { pct ->
+            val jobId = postJob(zip, iters, maxRes, baseUrl, trainer, refine) { pct ->
                 onProgress(Progress("Uploading", pct = pct))
             }
             Log.i(TAG, "cloud job $jobId started")
 
+            var psnr = -1.0
+            var ssim = -1.0
             while (true) {
                 val st = getStatus(jobId, baseUrl)
+                if (st.has("psnr")) {          // held-out quality (present once evaluated)
+                    psnr = st.optDouble("psnr", psnr)
+                    ssim = st.optDouble("ssim", ssim)
+                }
                 when (st.optString("state")) {
                     "done" -> break
                     "error" -> throw RuntimeException(st.optString("error", "backend error"))
                     "cancelled" -> throw kotlinx.coroutines.CancellationException("cancelled")
                     "queued" -> onProgress(
                         Progress("Queued", iter = st.optInt("queue_pos"), jobId = jobId))
-                    else -> onProgress(
-                        Progress("Reconstructing", iter = st.optInt("iter"),
-                            total = st.optInt("total"), elapsed = st.optInt("elapsed"), jobId = jobId),
-                    )
+                    else -> {
+                        // Phases with no iteration count — refine (before training),
+                        // eval/export (after) — show as their own indeterminate step
+                        // so the UI never sits frozen at 100%.
+                        val label = when (st.optString("phase")) {
+                            "refine" -> "Refining"
+                            "eval" -> "Evaluating"
+                            "export" -> "Exporting"
+                            else -> "Reconstructing"
+                        }
+                        onProgress(
+                            if (label == "Reconstructing")
+                                Progress(label, iter = st.optInt("iter"), total = st.optInt("total"),
+                                    elapsed = st.optInt("elapsed"), jobId = jobId)
+                            else Progress(label, elapsed = st.optInt("elapsed"), jobId = jobId),
+                        )
+                    }
                 }
                 delay(2000)
             }
@@ -72,10 +91,23 @@ object CloudBuild {
             val out = File(scanDir, "splat/cloud.ply")
             out.parentFile?.mkdirs()
             downloadResult(jobId, baseUrl, out)
+            if (psnr > 0) writeMetrics(scanDir, psnr, ssim, iters, trainer)
             onProgress(Progress("Done"))
             out
         } finally {
             zip.delete()
+        }
+    }
+
+    /** Persist held-out quality metrics next to the scan so the home screen can
+     *  show them after the fact (the in-memory JobState doesn't survive restart). */
+    private fun writeMetrics(scanDir: File, psnr: Double, ssim: Double, iters: Int, trainer: String) {
+        try {
+            val o = JSONObject()
+                .put("psnr", psnr).put("ssim", ssim).put("iters", iters).put("trainer", trainer)
+            File(scanDir, METRICS_NAME).writeText(o.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "metrics write failed: ${e.message}")
         }
     }
 
@@ -86,6 +118,7 @@ object CloudBuild {
             scanDir.walkTopDown().filter { it.isFile }.forEach { f ->
                 val rel = f.relativeTo(scanDir).path
                 if (rel.startsWith("splat/") || rel.startsWith("splat\\")) return@forEach
+                if (rel == METRICS_NAME) return@forEach   // local-only; don't re-ship
                 zos.putNextEntry(ZipEntry(rel))
                 f.inputStream().use { it.copyTo(zos) }
                 zos.closeEntry()
@@ -93,8 +126,10 @@ object CloudBuild {
         }
     }
 
-    private fun postJob(zip: File, iters: Int, maxRes: Int, baseUrl: String, trainer: String, onUpload: (Int) -> Unit): String {
-        val conn = URL("$baseUrl/jobs?iters=$iters&max_res=$maxRes&trainer=$trainer").openConnection() as HttpURLConnection
+    private fun postJob(zip: File, iters: Int, maxRes: Int, baseUrl: String, trainer: String, refine: String, onUpload: (Int) -> Unit): String {
+        // eval_split=8 holds out every 8th view so the backend reports a held-out
+        // PSNR/SSIM (the standard 3DGS convention) — that's the per-scan metric.
+        val conn = URL("$baseUrl/jobs?iters=$iters&max_res=$maxRes&trainer=$trainer&refine=$refine&eval_split=8").openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/zip")
@@ -144,5 +179,6 @@ object CloudBuild {
         }
     }
 
+    const val METRICS_NAME = "metrics.json"
     private const val TAG = "rumahku-cloud"
 }

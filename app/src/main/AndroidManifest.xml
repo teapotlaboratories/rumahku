@@ -74,6 +74,13 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.Rumahku.Dark" />
 
+        <!-- Full-screen viewer for a scan's captured keyframes (QA). -->
+        <activity
+            android:name=".ImageGalleryActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.Rumahku.Dark" />
+
         <!-- Lets us share the exported .ply to other apps via a content:// URI. -->
         <provider
             android:name="androidx.core.content.FileProvider"
