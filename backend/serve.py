@@ -249,33 +249,45 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
     # part of the nerfstudio image).
     with open(os.path.join(ds_dir, "_prep.py"), "w") as pf:
         pf.write(_SPLAT_PREP_PY)
-    # Quality config, validated by an A/B sweep on real captures (opacity 0.26 ->
-    # 0.98, i.e. hazy translucent splat -> solid):
-    #  - 30k iters: splatfacto's schedule is 30k-tuned; stop_split_at defaults to
-    #    15000, so stopping at 15k densifies to the last step and SKIPS the whole
-    #    settle/refine phase where opacities sharpen — the direct cause of the
-    #    hazy, semi-transparent look. The app requests 15k, so we floor it to 30k.
-    #  - use-bilateral-grid: absorbs per-frame auto-exposure/AWB drift so Gaussians
-    #    go opaque instead of translucent-averaging conflicting exposures.
-    #  - color-corrected-metrics: the grid is train-only, so held-out PSNR needs an
-    #    affine colour match to be meaningful (reports cc_psnr).
-    #  - default cull_alpha_thresh (0.1): the old 0.005 kept translucent floaters.
-    #  - NO camera-optimizer: it drifts the already-good ARCore poses and only hurt.
-    #  - load-3D-points: guarantees the ARCore seed.ply init (vs random 50k).
-    # ns-eval computes a held-out PSNR/SSIM into metrics.json; then export the .ply.
-    # `|| true` keeps a metrics hiccup from failing the build.
+    # colmap_refine.py runs inside the nerfstudio container (which has COLMAP +
+    # numpy), so drop a copy into the mounted dataset dir.
+    shutil.copy(REFINE_SCRIPT, os.path.join(ds_dir, "colmap_refine.py"))
+    # Quality config, A/B-validated on real captures — two fixes took splatfacto
+    # from a hazy sub-Brush splat to matching Brush:
+    #  (1) DE-HAZE (opacity 0.26 -> 0.98): 30k iters (splatfacto's schedule is
+    #      30k-tuned; 15k skips the opacity-settle phase — the app requests 15k so
+    #      we floor it), use-bilateral-grid (per-frame auto-exposure/AWB drift),
+    #      color-corrected-metrics (grid is train-only, so held-out PSNR needs an
+    #      affine colour match — reports cc_psnr), default cull (0.005 kept
+    #      floaters), NO camera-optimizer (drifts the good ARCore poses).
+    #  (2) SfM INIT (cc_psnr 20.2 -> 23.5, the reference config + biggest lever):
+    #      colmap_refine.py builds a BA-refined pose model + a dense ~90k-point
+    #      triangulated cloud, then we train via the `colmap` dataparser instead of
+    #      raw ARCore poses + the sparse seed. Fall back to nerfstudio-data if
+    #      COLMAP can't register the scan, so a refine hiccup never blocks a build.
+    # ns-eval writes held-out PSNR/SSIM to metrics.json (`|| true` tolerates a
+    # hiccup); then export the .ply.
     sf_iters = max(iters, 30000)
+    model = (
+        "--pipeline.model.use-bilateral-grid True "
+        "--pipeline.model.color-corrected-metrics True "
+        "--pipeline.model.use-scale-regularization True "
+        "--pipeline.model.rasterize-mode antialiased "
+        "--pipeline.model.densify-grad-thresh 0.0006"
+    )
+    base = (f"ns-train splatfacto --output-dir /ws/ns_out "
+            f"--max-num-iterations {sf_iters} --viewer.quit-on-train-completion True {model}")
     inner = (
         "set -e; "
         f"python3 /ws/_prep.py {max_res}; "
-        f"ns-train splatfacto --data /ws --output-dir /ws/ns_out "
-        f"--max-num-iterations {sf_iters} --viewer.quit-on-train-completion True "
-        f"--pipeline.model.use-bilateral-grid True "
-        f"--pipeline.model.color-corrected-metrics True "
-        f"--pipeline.model.use-scale-regularization True "
-        f"--pipeline.model.rasterize-mode antialiased "
-        f"--pipeline.model.densify-grad-thresh 0.0006 "
-        f"nerfstudio-data --downscale-factor 1 --load-3D-points True --eval-mode fraction; "
+        "python3 /ws/colmap_refine.py /ws || true; "
+        "if [ -f /ws/colmap/refined_ds/sparse/0/points3D.bin ]; then "
+        f"  {base} --data /ws/colmap/refined_ds colmap --colmap-path sparse/0 "
+        "--images-path images --downscale-factor 1 --load-3D-points True; "
+        "else "
+        f"  {base} --data /ws nerfstudio-data --downscale-factor 1 "
+        "--load-3D-points True --eval-mode fraction; "
+        "fi; "
         "CFG=$(find /ws/ns_out -name config.yml | head -1); "
         "ns-eval --load-config \"$CFG\" --output-path /ws/ns_out/metrics.json || true; "
         "ns-export gaussian-splat --load-config \"$CFG\" --output-dir /ws/ns_out/export"
