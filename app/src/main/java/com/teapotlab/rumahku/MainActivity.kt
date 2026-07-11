@@ -366,8 +366,15 @@ private fun HomeScreen() {
                 }
             },
             confirmButton = {
-                TextButton(onClick = { openGallery(context, s); metricsTarget = null }) {
-                    Text("View frames")
+                Row {
+                    if (hasMesh(s)) {
+                        TextButton(onClick = { openMeshViewer(context, s); metricsTarget = null }) {
+                            Text("View 3D map")
+                        }
+                    }
+                    TextButton(onClick = { openGallery(context, s); metricsTarget = null }) {
+                        Text("View frames")
+                    }
                 }
             },
             dismissButton = { TextButton(onClick = { metricsTarget = null }) { Text("Close") } },
@@ -567,6 +574,18 @@ private fun launchCloudBuild(
 
 private fun startCapture(context: Context) {
     context.startActivity(Intent(context, CaptureActivity::class.java))
+}
+
+/** True if a scan saved its live TSDF mesh (depth-bearing captures do; a
+ *  depth-less locked-exposure capture won't). */
+private fun hasMesh(scan: Scan): Boolean = File(scan.dir, "mesh.f32").exists()
+
+/** Open the offline orbit viewer for a scan's saved 3D map. */
+private fun openMeshViewer(context: Context, scan: Scan) {
+    context.startActivity(
+        Intent(context, MeshViewerActivity::class.java)
+            .putExtra(MeshViewerActivity.EXTRA_MESH_PATH, File(scan.dir, "mesh.f32").absolutePath)
+    )
 }
 
 /** Immersive scan card: photo fills the card, title over a gradient scrim.

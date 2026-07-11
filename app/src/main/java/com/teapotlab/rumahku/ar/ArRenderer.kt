@@ -43,6 +43,7 @@ class ArRenderer(
     private val projMatrix = FloatArray(16)
     private val viewMatrix = FloatArray(16)
     private val viewProjMatrix = FloatArray(16)
+    private var trackLog = 0     // throttles the tracking-state diagnostic log
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0f, 0f, 0f, 1f)
@@ -79,6 +80,11 @@ class ArRenderer(
             // Draw the live depth mesh anchored in world space. Only meaningful
             // while tracking, when the camera matrices are valid.
             val camera = frame.camera
+            // Log tracking ~1/sec — cheap diagnostic; distinguishes a tracking
+            // loss from a depth-only loss (e.g. under an AE/AWB exposure lock).
+            if (trackLog++ % 30 == 0) {
+                Log.i(TAG, "trackingState=${camera.trackingState} failure=${camera.trackingFailureReason}")
+            }
             if (camera.trackingState == TrackingState.TRACKING) {
                 camera.getProjectionMatrix(projMatrix, 0, Z_NEAR, Z_FAR)
                 camera.getViewMatrix(viewMatrix, 0)

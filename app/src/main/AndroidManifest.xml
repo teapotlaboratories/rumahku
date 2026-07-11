@@ -81,6 +81,13 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.Rumahku.Dark" />
 
+        <!-- Offline orbit viewer for a scan's saved TSDF mesh (the live 3D map). -->
+        <activity
+            android:name=".MeshViewerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.Rumahku.Dark" />
+
         <!-- Lets us share the exported .ply to other apps via a content:// URI. -->
         <provider
             android:name="androidx.core.content.FileProvider"
