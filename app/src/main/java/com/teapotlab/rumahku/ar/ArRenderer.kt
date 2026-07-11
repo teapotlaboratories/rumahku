@@ -29,10 +29,15 @@ class ArRenderer(
     private val displayRotationHelper: DisplayRotationHelper,
     private val tsdf: TsdfVolume,
     private val onFrame: (Frame) -> Unit,
+    // Fired on the GL thread once the camera background texture exists — the
+    // SharedCamera controller needs it before it can open the Camera2 device.
+    private val onGlReady: (textureId: Int) -> Unit = {},
+    // Live-mesh style: wireframe outline vs. the original solid shaded surface.
+    wireframeMesh: Boolean = false,
 ) : GLSurfaceView.Renderer {
 
     private val backgroundRenderer = BackgroundRenderer()
-    private val depthMeshRenderer = DepthMeshRenderer()
+    private val depthMeshRenderer = DepthMeshRenderer(wireframeMesh)
 
     // Scratch matrices reused each frame to avoid per-frame allocation.
     private val projMatrix = FloatArray(16)
@@ -43,6 +48,7 @@ class ArRenderer(
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         backgroundRenderer.createOnGlThread()
         depthMeshRenderer.createOnGlThread()
+        onGlReady(backgroundRenderer.textureId)
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {

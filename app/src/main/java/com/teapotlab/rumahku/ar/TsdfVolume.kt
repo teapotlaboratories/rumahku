@@ -40,9 +40,12 @@ class TsdfVolume {
     // (keyframes), not repeat pixel hits within one frame. Cleared per integrate.
     private val frameTouched = HashSet<Long>()
     private var cachedVertCount = 0
-    // Snapshot cache: rebuilt only when the mesh changed (not every render frame).
+    // Snapshot cache: rebuilt only when the mesh changed (not every render frame),
+    // and at most every MIN_REBUILD_NANOS so a big, fast-filling scan doesn't
+    // re-serialize the whole growing buffer 10×/s.
     private var snapshotStale = true
     private var cachedSnapshot = FloatArray(0)
+    private var lastSnapshotNanos = 0L
 
     /** Fuse one keyframe (its depth + [nv21] camera image) into the field. */
     fun integrate(frame: Frame, nv21: ByteArray, camW: Int, camH: Int, stride: Int) {
@@ -99,6 +102,31 @@ class TsdfVolume {
                         u += stride
                     }
                     v += stride
+                }
+                // Second pass — free-space carving. Any voxel BETWEEN the camera
+                // and a measured surface must be empty (we see through it), so
+                // erode floaters sitting there. Runs after the surface pass so a
+                // real surface observed this frame always wins (frameTouched).
+                if (ENABLE_CARVE) {
+                    var vc = 0
+                    while (vc < dh) {
+                        val rowBase = vc * rowStride
+                        var uc = 0
+                        while (uc < dw) {
+                            val mm = buf.getShort(rowBase + uc * 2).toInt() and 0xFFFF
+                            val cok = cBuf == null ||
+                                (cBuf.get(vc * cRowStride + uc).toInt() and 0xFF) >= CONF_MIN
+                            if (mm != 0 && cok) {
+                                val z = mm / 1000f
+                                if (z in MIN_M..MAX_M) {
+                                    carveSample(uc.toFloat() * camW / dw, vc.toFloat() * camH / dh,
+                                        z, m, fx, fy, px, py)
+                                }
+                            }
+                            uc += stride
+                        }
+                        vc += stride
+                    }
                 }
                 remeshDirty()
             }
@@ -167,7 +195,11 @@ class TsdfVolume {
             vox[3] = (vox[3] * w + g) / (w + 1f)
             vox[4] = (vox[4] * w + b) / (w + 1f)
         }
-        // The 8 cubes whose corners include this voxel.
+        markIncidentCubesDirty(ix, iy, iz)
+    }
+
+    /** Mark the 8 cubes whose corners include voxel (ix,iy,iz) for re-meshing. */
+    private fun markIncidentCubesDirty(ix: Int, iy: Int, iz: Int) {
         var dx = -1
         while (dx <= 0) {
             var dy = -1
@@ -181,6 +213,49 @@ class TsdfVolume {
             }
             dx++
         }
+    }
+
+    /** Walk the free space in front of a measured surface point and erode any
+     *  existing voxels there (see [carveVoxel]). Camera basis is ARCore's. */
+    private fun carveSample(
+        cpx: Float, cpy: Float, d: Float, m: FloatArray,
+        fx: Float, fy: Float, px: Float, py: Float,
+    ) {
+        val lx = (cpx - px) * d / fx
+        val ly = -(cpy - py) * d / fy
+        val lz = -d
+        val sxw = m[0] * lx + m[4] * ly + m[8] * lz + m[12]
+        val syw = m[1] * lx + m[5] * ly + m[9] * lz + m[13]
+        val szw = m[2] * lx + m[6] * ly + m[10] * lz + m[14]
+        val ox = m[12]; val oy = m[13]; val oz = m[14]
+        var rx = sxw - ox; var ry = syw - oy; var rz = szw - oz
+        val dist = sqrt(rx * rx + ry * ry + rz * rz)
+        if (dist < 1e-3f) return
+        rx /= dist; ry /= dist; rz /= dist
+        // From a bounded distance in front of the surface up to the near edge of
+        // its truncation band (never into the surface itself).
+        var t = maxOf(MIN_M, dist - CARVE_MAX_DIST)
+        val tEnd = dist - TRUNC_M
+        while (t <= tEnd) {
+            carveVoxel(ox + rx * t, oy + ry * t, oz + rz * t)
+            t += VOXEL_M
+        }
+    }
+
+    /** Erode one free-space voxel: only touches EXISTING voxels that still read
+     *  as surface — pulls the SDF toward "empty" and decays the view-weight, so a
+     *  few contradicting looks drop a floater below the meshing threshold. */
+    private fun carveVoxel(wx: Float, wy: Float, wz: Float) {
+        val ix = floor(wx / VOXEL_M).toInt()
+        val iy = floor(wy / VOXEL_M).toInt()
+        val iz = floor(wz / VOXEL_M).toInt()
+        val key = voxelKey(ix, iy, iz)
+        if (!frameTouched.add(key)) return       // a surface obs this frame wins
+        val vox = voxels[key] ?: return           // only erode what already exists
+        if (vox[0] >= CARVE_SDF_THRESH) return    // already ~empty, nothing to erode
+        vox[0] = (vox[0] + 1f) * 0.5f             // pull strongly toward empty (+1)
+        vox[1] = vox[1] * CARVE_DECAY             // decay confidence → falls under mesh gate
+        markIncidentCubesDirty(ix, iy, iz)        // re-mesh: the floater's surface drops out
     }
 
     /** Re-extract triangles for every dirty cube (incremental marching cubes). */
@@ -279,6 +354,14 @@ class TsdfVolume {
      *  Cached — only rebuilt after the mesh changes, not every render frame. */
     fun snapshot(): FloatArray = synchronized(lock) {
         if (!snapshotStale) return cachedSnapshot
+        // Throttle rebuilds: depth fuses ~10 Hz but the display only needs a few
+        // Hz. Return the last buffer in between so the render thread + VBO upload
+        // stay cheap as the mesh grows.
+        val now = System.nanoTime()
+        if (cachedSnapshot.isNotEmpty() && now - lastSnapshotNanos < MIN_REBUILD_NANOS) {
+            return cachedSnapshot
+        }
+        lastSnapshotNanos = now
         val out = FloatArray(cachedVertCount * VERT_FLOATS)
         var o = 0
         for (arr in cubeTris.values) {
@@ -291,6 +374,39 @@ class TsdfVolume {
     }
 
     fun triangleCount(): Int = synchronized(lock) { cachedVertCount / 3 }
+
+    /**
+     * Extract the fused surface as a dense seed point cloud: one point per
+     * near-surface, well-observed voxel, carrying its **true** fused colour (not
+     * the display "clay" tint) as [x,y,z, r,g,b] with rgb in 0..255 — the same
+     * format as [SeedPointCloud.snapshot].
+     *
+     * Why: sparse ARCore feature points cluster on texture and miss blank walls —
+     * the dominant reconstruction failure mode. The raw-depth TSDF surface covers
+     * those walls, so adding it to seed.ply gives the trainer a wall-covering
+     * init. Uniformly subsampled to at most [maxPoints] to keep seed.ply (and the
+     * on-device init) bounded.
+     */
+    fun surfaceSeed(maxPoints: Int): List<FloatArray> = synchronized(lock) {
+        val keys = ArrayList<Long>()
+        for ((key, vox) in voxels) {
+            // Well-observed (weight) and near the zero-crossing (|tsdf| small).
+            if (vox[1] >= MIN_CAPTURE_WEIGHT && kotlin.math.abs(vox[0]) <= SEED_BAND) keys.add(key)
+        }
+        val step = if (maxPoints > 0 && keys.size > maxPoints) keys.size / maxPoints else 1
+        val out = ArrayList<FloatArray>(if (step > 0) keys.size / step + 1 else keys.size)
+        var i = 0
+        while (i < keys.size) {
+            val k = keys[i]
+            val vox = voxels[k]!!
+            out.add(floatArrayOf(
+                unpackX(k) * VOXEL_M, unpackY(k) * VOXEL_M, unpackZ(k) * VOXEL_M,
+                vox[2] * 255f, vox[3] * 255f, vox[4] * 255f,
+            ))
+            i += step
+        }
+        out
+    }
 
     fun clear() = synchronized(lock) {
         voxels.clear(); cubeTris.clear(); dirty.clear(); frameTouched.clear()
@@ -316,8 +432,12 @@ class TsdfVolume {
 
     companion object {
         const val VERT_FLOATS = 8          // x,y,z,r,g,b,bx,by
-        private const val VOXEL_M = 0.04f  // 4 cm voxels (coarser → more continuous)
-        private const val TRUNC_M = 0.09f  // truncation band (± around surface)
+        private const val MIN_REBUILD_NANOS = 160_000_000L  // cap mesh rebuild ≈6 Hz
+        // 6 cm voxels: ~55% fewer triangles than 4 cm (so a big scan stays cheap
+        // to draw) — the guidance-mesh resolution Mobile3DRecon used. Truncation
+        // scales with it (~2 voxels either side of the surface).
+        private const val VOXEL_M = 0.06f
+        private const val TRUNC_M = 0.13f
         private const val MIN_M = 0.3f
         private const val MAX_M = 4.0f
         private const val WMAX = 40f       // cap running weight
@@ -326,6 +446,15 @@ class TsdfVolume {
         // keyframes; confidence then ramps to full colour over FADE_RANGE more.
         private const val MIN_CAPTURE_WEIGHT = 3f
         private const val FADE_RANGE = 5f
+        // Seed extraction: keep voxels within this |tsdf| of the zero-crossing —
+        // ~one voxel-thick surface shell (tsdf is ±1 at ±TRUNC_M).
+        private const val SEED_BAND = 0.5f
+        // Free-space carving (floater removal). Tunable on-device: more aggressive
+        // decay removes floaters faster but risks eroding thin/rarely-seen surfaces.
+        private const val ENABLE_CARVE = true
+        private const val CARVE_MAX_DIST = 1.2f   // how far in front of a surface to carve (m)
+        private const val CARVE_SDF_THRESH = 0.5f // only erode voxels still reading surface-ish
+        private const val CARVE_DECAY = 0.6f      // view-weight kept per contradicting look
         // Low-confidence tint (neutral cool-grey "clay") for just-captured surface
         // — fades to the true camera colour as the area is observed from more views.
         private const val LOWCONF_R = 0.58f

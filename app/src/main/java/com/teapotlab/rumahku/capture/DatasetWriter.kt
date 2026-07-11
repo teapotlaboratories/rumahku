@@ -56,11 +56,23 @@ class DatasetWriter(private val sessionDir: File) {
      * ARCore feature points — a seed.ply plus a `ply_file_path` reference so the
      * on-device trainer seeds from it instead of random init (M3).
      */
-    fun finish(intrinsics: CameraIntrinsics?, seedPoints: List<FloatArray> = emptyList()) {
+    fun finish(
+        intrinsics: CameraIntrinsics?,
+        seedPoints: List<FloatArray> = emptyList(),
+        altSeedName: String? = null,
+        altSeedPoints: List<FloatArray> = emptyList(),
+        imageW: Int = 0,
+        imageH: Int = 0,
+    ) {
         try {
             val hasSeed = seedPoints.size >= MIN_SEED_POINTS
-            if (hasSeed) writeSeedPly(seedPoints)
-            val json = buildTransforms(intrinsics, if (hasSeed) SEED_PLY_NAME else null)
+            if (hasSeed) writeSeedPly(SEED_PLY_NAME, seedPoints)
+            // Optional companion cloud (e.g. feature-only) — not referenced by
+            // transforms.json, just kept alongside for offline A/B comparison.
+            if (altSeedName != null && altSeedPoints.size >= MIN_SEED_POINTS) {
+                writeSeedPly(altSeedName, altSeedPoints)
+            }
+            val json = buildTransforms(intrinsics, if (hasSeed) SEED_PLY_NAME else null, imageW, imageH)
             File(sessionDir, "transforms.json").writeText(json.toString(2))
             Log.i(
                 TAG,
@@ -73,14 +85,14 @@ class DatasetWriter(private val sessionDir: File) {
         }
     }
 
-    /** Writes accumulated world points as an ASCII point-cloud PLY (positions).
-     *  Non-finite points are dropped here too (defense in depth) — a single NaN
-     *  aborts the trainer, and the vertex count must match the lines written. */
-    private fun writeSeedPly(points: List<FloatArray>) {
+    /** Writes world points as an ASCII point-cloud PLY (positions + colour) to
+     *  [name]. Non-finite points are dropped here too (defense in depth) — a
+     *  single NaN aborts the trainer, and the vertex count must match the lines. */
+    private fun writeSeedPly(name: String, points: List<FloatArray>) {
         val finite = points.filter { it[0].isFinite() && it[1].isFinite() && it[2].isFinite() }
         val sb = StringBuilder(64 + finite.size * 32)
         sb.append("ply\n").append("format ascii 1.0\n")
-            .append("comment rumahku ARCore feature-point seed\n")
+            .append("comment rumahku seed (ARCore features + raw-depth surface)\n")
             .append("element vertex ").append(finite.size).append('\n')
             .append("property float x\nproperty float y\nproperty float z\n")
             .append("property uchar red\nproperty uchar green\nproperty uchar blue\n")
@@ -90,10 +102,12 @@ class DatasetWriter(private val sessionDir: File) {
                 .append(p[3].toInt()).append(' ').append(p[4].toInt()).append(' ').append(p[5].toInt())
                 .append('\n')
         }
-        File(sessionDir, SEED_PLY_NAME).writeText(sb.toString())
+        File(sessionDir, name).writeText(sb.toString())
     }
 
-    private fun buildTransforms(intrinsics: CameraIntrinsics?, plyFileName: String?): JSONObject {
+    private fun buildTransforms(
+        intrinsics: CameraIntrinsics?, plyFileName: String?, imageW: Int, imageH: Int,
+    ): JSONObject {
         val root = JSONObject()
         // ARCore's world is gravity-aligned (+Y up), so the viewer can level the
         // walkthrough. (Imported COLMAP datasets omit this → not leveled.)
@@ -107,17 +121,20 @@ class DatasetWriter(private val sessionDir: File) {
         if (intrinsics != null) {
             val focal = intrinsics.focalLength        // [fx, fy] in pixels
             val principal = intrinsics.principalPoint // [cx, cy] in pixels
-            val dims = intrinsics.imageDimensions      // [w, h]
+            val dims = intrinsics.imageDimensions      // intrinsics' native [w, h]
+            // High-res keyframes share the GPU texture's 16:9 FOV (we pass the
+            // texture intrinsics for them), so they scale by the size ratio.
+            val scale = if (imageW > 0 && dims[0] > 0) imageW.toDouble() / dims[0] else 1.0
             // No camera_model field: ARCore gives an undistorted pinhole camera,
             // and nerfstudio / Brush / instant-ngp all treat an absent model as
             // pinhole. Emitting "PINHOLE" (a COLMAP term) is not recognized by
             // those loaders and breaks the dataset.
-            root.put("fl_x", focal[0].toDouble())
-            root.put("fl_y", focal[1].toDouble())
-            root.put("cx", principal[0].toDouble())
-            root.put("cy", principal[1].toDouble())
-            root.put("w", dims[0])
-            root.put("h", dims[1])
+            root.put("fl_x", focal[0].toDouble() * scale)
+            root.put("fl_y", focal[1].toDouble() * scale)
+            root.put("cx", principal[0].toDouble() * scale)
+            root.put("cy", principal[1].toDouble() * scale)
+            root.put("w", if (imageW > 0) imageW else dims[0])
+            root.put("h", if (imageH > 0) imageH else dims[1])
         }
 
         val framesArray = JSONArray()

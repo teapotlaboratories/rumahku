@@ -98,12 +98,28 @@ private fun CloudBuildScreen(scanDir: File, onClose: () -> Unit) {
                 else -> {
                     Text("Building in the cloud", style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold)
-                    val det = s?.phase == "Uploading" && (s.pct in 0..100)
-                    CircularProgressIndicator(
-                        progress = { if (det) s!!.pct / 100f else 0f },
-                        modifier = Modifier.size(120.dp),
-                        strokeWidth = 8.dp,
-                    )
+                    // Determinate fill when we have a real fraction (upload % or
+                    // training iters); an animated indeterminate ring otherwise, so
+                    // phases without a count (queued/refining/downloading) never look
+                    // frozen at 0.
+                    val frac: Float? = when {
+                        s?.phase == "Uploading" && s.pct in 0..100 -> s.pct / 100f
+                        s?.phase == "Reconstructing" && s.total > 0 && s.iter > 0 ->
+                            (s.iter.toFloat() / s.total).coerceIn(0f, 1f)
+                        else -> null
+                    }
+                    if (frac != null) {
+                        CircularProgressIndicator(
+                            progress = { frac },
+                            modifier = Modifier.size(120.dp),
+                            strokeWidth = 8.dp,
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(120.dp),
+                            strokeWidth = 8.dp,
+                        )
+                    }
                     Text(phaseLabel(s), style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.primary)
                     if (s?.phase == "Reconstructing" && s.total > 0) {
@@ -132,7 +148,10 @@ private fun phaseLabel(s: CloudBuildService.JobState?): String = when (s?.phase)
     "Packaging" -> "Packaging the scan…"
     "Uploading" -> if (s.pct in 0..100) "Uploading… ${s.pct}%" else "Uploading…"
     "Queued" -> if (s.iter > 1) "Waiting for GPU · #${s.iter} in queue" else "Waiting for GPU…"
+    "Refining" -> "Refining camera poses (COLMAP)…"
     "Reconstructing" -> "Reconstructing on GPU…"
+    "Evaluating" -> "Scoring quality on held-out views…"
+    "Exporting" -> "Exporting the 3D model…"
     "Downloading" -> "Downloading the 3D model…"
     else -> s.phase
 }

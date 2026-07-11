@@ -42,8 +42,10 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -54,6 +56,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -101,7 +107,11 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class ScanStatus { READY, CAPTURED }
-private class Scan(val dir: File, val title: String, val thumb: File?, val status: ScanStatus)
+private class ScanMetrics(val psnr: Double, val ssim: Double, val iters: Int, val trainer: String)
+private class Scan(
+    val dir: File, val title: String, val thumb: File?, val status: ScanStatus,
+    val metrics: ScanMetrics? = null,
+)
 
 @Composable
 private fun HomeScreen() {
@@ -129,7 +139,10 @@ private fun HomeScreen() {
     var manageScan by remember { mutableStateOf<Scan?>(null) }
     var renameTarget by remember { mutableStateOf<Scan?>(null) }
     var deleteTarget by remember { mutableStateOf<Scan?>(null) }
-    var buildScan by remember { mutableStateOf<Scan?>(null) }   // quality picker
+    var metricsTarget by remember { mutableStateOf<Scan?>(null) }   // quality dialog
+    // Build/rebuild quality picker. Targets = a single scan (tap a New card) or
+    // several (multi-select → Rebuild). Empty = closed.
+    var buildTargets by remember { mutableStateOf<List<Scan>>(emptyList()) }
     var showSettings by remember { mutableStateOf(false) }      // backend URL editor
     // Multi-select mode: long-press a card to enter, tap to toggle. Built for
     // batch delete now, batch export later.
@@ -188,14 +201,10 @@ private fun HomeScreen() {
             }
         },
     ) { pad ->
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            modifier = Modifier.fillMaxSize().padding(pad),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 20.dp, 16.dp, 96.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
+        Column(Modifier.fillMaxSize().padding(pad)) {
+            // Pinned header — stays put while the grid scrolls, so the multi-select
+            // actions (delete, rebuild, …) are always reachable.
+            Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp)) {
                 if (selectionMode) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { exitSelection() }) {
@@ -205,9 +214,15 @@ private fun HomeScreen() {
                             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                         if (selected.size == 1) {
                             IconButton(onClick = {
+                                metricsTarget = scans.find { it.dir.absolutePath == selected.first() }
+                            }) { Icon(Icons.Filled.Info, contentDescription = "Quality metrics") }
+                            IconButton(onClick = {
                                 renameTarget = scans.find { it.dir.absolutePath == selected.first() }
                             }) { Icon(Icons.Filled.Edit, contentDescription = "Rename") }
                         }
+                        IconButton(onClick = {
+                            buildTargets = scans.filter { selected.contains(it.dir.absolutePath) }
+                        }) { Icon(Icons.Filled.Refresh, contentDescription = "Rebuild selected") }
                         IconButton(onClick = { confirmDeleteSelected = true }) {
                             Icon(Icons.Filled.Delete, contentDescription = "Delete selected",
                                 tint = MaterialTheme.colorScheme.error)
@@ -229,6 +244,13 @@ private fun HomeScreen() {
                     }
                 }
             }
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 4.dp, 16.dp, 96.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
             if (scans.isEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) { EmptyState() }
             } else {
@@ -238,12 +260,20 @@ private fun HomeScreen() {
                     ScanCard(
                         scan,
                         progress = when {
+                            // -1f = building but no known fraction yet (upload/queue/
+                            // refine) → an indeterminate spinner; ≥0 = a real fraction.
                             cloudBuilding -> if (cj!!.phase == "Reconstructing" && cj.total > 0 && cj.iter > 0)
-                                (cj.iter.toFloat() / cj.total).coerceIn(0f, 1f) else 0f
+                                (cj.iter.toFloat() / cj.total).coerceIn(0f, 1f) else -1f
                             reconstructing && scan.dir.absolutePath == currentDir -> buildPct
                             else -> null
                         },
-                        buildLabel = if (cloudBuilding && cj!!.phase == "Queued") "Queued…" else null,
+                        buildLabel = if (cloudBuilding) when (cj!!.phase) {
+                            "Queued" -> "Queued…"
+                            "Refining" -> "Refining poses…"
+                            "Evaluating" -> "Evaluating…"
+                            "Exporting" -> "Exporting…"
+                            else -> null
+                        } else null,
                         selected = selectionMode && selected.contains(scan.dir.absolutePath),
                         selectionMode = selectionMode,
                         onClick = {
@@ -254,7 +284,7 @@ private fun HomeScreen() {
                                 cloudBuilding -> launchCloudBuild(
                                     context, scan, cj!!.total.coerceAtLeast(2000), 1920)
                                 scan.status == ScanStatus.READY -> openViewer(context, scan)
-                                else -> buildScan = scan
+                                else -> buildTargets = listOf(scan)
                             }
                         },
                         onLongClick = {
@@ -262,6 +292,7 @@ private fun HomeScreen() {
                         },
                     )
                 }
+            }
             }
         }
     }
@@ -312,37 +343,91 @@ private fun HomeScreen() {
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } },
         )
     }
-    buildScan?.let { s ->
+    metricsTarget?.let { s ->
         AlertDialog(
-            onDismissRequest = { buildScan = null },
-            title = { Text("Build your 3D scan") },
+            onDismissRequest = { metricsTarget = null },
+            title = { Text("Scan · ${s.title}", fontWeight = FontWeight.Bold) },
             text = {
-                Column {
-                    QualityOption("Cloud · Fast", "1500 iters · GPU, ~2 min") {
-                        launchCloudBuild(context, s, 1500, 720); buildScan = null
-                    }
-                    QualityOption("Cloud · Balanced", "3000 iters · GPU, ~5 min") {
-                        launchCloudBuild(context, s, 3000, 1024); buildScan = null
-                    }
-                    QualityOption("Cloud · High", "6000 iters · best quality") {
-                        launchCloudBuild(context, s, 6000, 1600); buildScan = null
-                    }
-                    QualityOption("Cloud · Splatfacto", "experimental · pose-optimized") {
-                        launchCloudBuild(context, s, 15000, 1600, trainer = "splatfacto"); buildScan = null
-                    }
-                    QualityOption("On-device", "2000 iters · offline, slower") {
-                        launchBuild(context, s, 2000); buildScan = null
+                val m = s.metrics
+                if (m == null) {
+                    Text("No quality score yet. Build (or rebuild) this scan and its " +
+                        "held-out PSNR/SSIM will appear here.")
+                } else {
+                    Column {
+                        MetricRow("PSNR", "%.2f dB".format(m.psnr))
+                        MetricRow("SSIM", "%.3f".format(m.ssim))
+                        MetricRow("Trainer", m.trainer.replaceFirstChar { it.uppercase() })
+                        MetricRow("Iterations", "%,d".format(m.iters))
+                        Text("Measured on held-out views — higher = closer to the real photos.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 10.dp))
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { buildScan = null }) { Text("Cancel") } },
+            confirmButton = {
+                TextButton(onClick = { openGallery(context, s); metricsTarget = null }) {
+                    Text("View frames")
+                }
+            },
+            dismissButton = { TextButton(onClick = { metricsTarget = null }) { Text("Close") } },
+        )
+    }
+    if (buildTargets.isNotEmpty()) {
+        val targets = buildTargets
+        val multi = targets.size > 1
+        // Kick off a cloud build for every target. A single scan also opens the
+        // watch screen; a batch stays on home (cards show their own progress).
+        fun runCloud(iters: Int, maxRes: Int, trainer: String = "brush", refine: String = "") {
+            if (multi) {
+                targets.forEach {
+                    CloudBuildService.start(context, it.dir.absolutePath, iters, maxRes, trainer, refine)
+                }
+                Toast.makeText(context, "Rebuilding ${targets.size} scans", Toast.LENGTH_SHORT).show()
+            } else {
+                launchCloudBuild(context, targets.first(), iters, maxRes, trainer, refine)
+            }
+            buildTargets = emptyList(); exitSelection()
+        }
+        AlertDialog(
+            onDismissRequest = { buildTargets = emptyList() },
+            title = {
+                Text(when {
+                    multi -> "Rebuild ${targets.size} scans"
+                    targets.first().status == ScanStatus.READY -> "Rebuild 3D scan"
+                    else -> "Build your 3D scan"
+                })
+            },
+            text = {
+                Column {
+                    QualityOption("Cloud · Fast", "1500 iters · GPU, ~2 min") { runCloud(1500, 720) }
+                    QualityOption("Cloud · Balanced", "3000 iters · GPU, ~5 min") { runCloud(3000, 1024) }
+                    QualityOption("Cloud · High", "6000 iters · best quality") { runCloud(6000, 1600) }
+                    QualityOption("Cloud · High+", "6000 iters · COLMAP pose refine (+~5 min)") {
+                        runCloud(6000, 1600, refine = "colmap")
+                    }
+                    QualityOption("Cloud · Splatfacto", "experimental · pose-optimized") {
+                        runCloud(15000, 1600, trainer = "splatfacto")
+                    }
+                    // On-device is a single foreground build, so only for one scan.
+                    if (!multi) {
+                        QualityOption("On-device", "2000 iters · offline, slower") {
+                            launchBuild(context, targets.first(), 2000)
+                            buildTargets = emptyList(); exitSelection()
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { buildTargets = emptyList() }) { Text("Cancel") } },
         )
     }
     if (showSettings) {
         var url by remember { mutableStateOf(Settings.backendUrl(context)) }
+        var highRes by remember { mutableStateOf(Settings.highResCapture(context)) }
+        var wireframe by remember { mutableStateOf(Settings.wireframeMesh(context)) }
         AlertDialog(
             onDismissRequest = { showSettings = false },
-            title = { Text("Cloud backend") },
+            title = { Text("Settings") },
             text = {
                 Column {
                     Text("Server address used for cloud builds.",
@@ -356,13 +441,48 @@ private fun HomeScreen() {
                     TextButton(onClick = { url = Settings.DEFAULT_BACKEND_URL }) {
                         Text("Reset to default")
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("High-res capture", fontWeight = FontWeight.SemiBold)
+                            Text("Save keyframes at full sensor resolution (~9 MP) for more " +
+                                "detail. Bigger files and uploads; the live mesh still works.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(checked = highRes, onCheckedChange = { highRes = it })
+                    }
+                    Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
+                        Text("Live mesh", fontWeight = FontWeight.SemiBold)
+                        Text("How the scan surface is drawn while capturing.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        SingleChoiceSegmentedButtonRow(
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                        ) {
+                            SegmentedButton(
+                                selected = !wireframe,
+                                onClick = { wireframe = false },
+                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                            ) { Text("Solid") }
+                            SegmentedButton(
+                                selected = wireframe,
+                                onClick = { wireframe = true },
+                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                            ) { Text("Wireframe") }
+                        }
+                    }
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
                     Settings.setBackendUrl(context, url)
+                    Settings.setHighResCapture(context, highRes)
+                    Settings.setWireframeMesh(context, wireframe)
                     showSettings = false
-                    Toast.makeText(context, "Backend saved", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Settings saved", Toast.LENGTH_SHORT).show()
                 }) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = { showSettings = false }) { Text("Cancel") } },
@@ -388,6 +508,17 @@ private fun HomeScreen() {
 }
 
 @Composable
+private fun MetricRow(label: String, value: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
 private fun QualityOption(title: String, subtitle: String, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 10.dp)) {
         Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -403,6 +534,14 @@ private fun openViewer(context: Context, scan: Scan) {
     )
 }
 
+/** Open the full-screen viewer over this scan's captured keyframe images. */
+private fun openGallery(context: Context, scan: Scan) {
+    context.startActivity(
+        Intent(context, ImageGalleryActivity::class.java)
+            .putExtra(ImageGalleryActivity.EXTRA_DATASET, scan.dir.absolutePath)
+    )
+}
+
 private fun launchBuild(context: Context, scan: Scan, iters: Int) {
     context.startActivity(
         Intent(context, ReconstructionActivity::class.java)
@@ -412,11 +551,12 @@ private fun launchBuild(context: Context, scan: Scan, iters: Int) {
 }
 
 private fun launchCloudBuild(
-    context: Context, scan: Scan, iters: Int, maxRes: Int, trainer: String = "brush",
+    context: Context, scan: Scan, iters: Int, maxRes: Int,
+    trainer: String = "brush", refine: String = "",
 ) {
     // Start the background build (idempotent for an already-building scan), then
     // open the watch screen. Leaving that screen keeps the build running.
-    CloudBuildService.start(context, scan.dir.absolutePath, iters, maxRes, trainer)
+    CloudBuildService.start(context, scan.dir.absolutePath, iters, maxRes, trainer, refine)
     context.startActivity(
         Intent(context, CloudBuildActivity::class.java)
             .putExtra(CloudBuildActivity.EXTRA_DATASET, scan.dir.absolutePath)
@@ -458,12 +598,20 @@ private fun ScanCard(scan: Scan, progress: Float?, buildLabel: String? = null,
             if (progress != null) {
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
                     contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier.size(56.dp),
-                        color = Color.White,
-                        trackColor = Color.White.copy(alpha = 0.3f),
-                    )
+                    if (progress < 0f) {
+                        CircularProgressIndicator(              // indeterminate — spins
+                            modifier = Modifier.size(56.dp),
+                            color = Color.White,
+                            trackColor = Color.White.copy(alpha = 0.3f),
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier.size(56.dp),
+                            color = Color.White,
+                            trackColor = Color.White.copy(alpha = 0.3f),
+                        )
+                    }
                 }
             } else {
                 StatusDotChip(scan.status, Modifier.align(Alignment.TopStart).padding(10.dp))
@@ -478,7 +626,8 @@ private fun ScanCard(scan: Scan, progress: Float?, buildLabel: String? = null,
                 Text(scan.title, color = Color.White,
                     style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 Text(
-                    if (progress != null) (buildLabel ?: "Building ${(progress * 100).toInt()}%")
+                    if (progress != null)
+                        (buildLabel ?: if (progress >= 0f) "Building ${(progress * 100).toInt()}%" else "Building…")
                     else secondaryLabel(scan.status),
                     color = Color.White.copy(alpha = 0.85f),
                     style = MaterialTheme.typography.labelSmall,
@@ -565,8 +714,19 @@ private fun loadScans(context: Context): List<Scan> {
         val thumb = File(dir, "images/000000.jpg").takeIf { it.exists() }
         val custom = File(dir, "name.txt").takeIf { it.exists() }?.readText()?.trim()?.ifBlank { null }
         Scan(dir, custom ?: friendlyTitle(dir.name), thumb,
-            if (ready) ScanStatus.READY else ScanStatus.CAPTURED)
+            if (ready) ScanStatus.READY else ScanStatus.CAPTURED, loadMetrics(dir))
     }
+}
+
+/** Read the held-out quality metrics a cloud build wrote next to the scan. */
+private fun loadMetrics(dir: File): ScanMetrics? = try {
+    val f = File(dir, CloudBuild.METRICS_NAME)
+    if (!f.exists()) null else org.json.JSONObject(f.readText()).let {
+        ScanMetrics(it.optDouble("psnr"), it.optDouble("ssim"),
+            it.optInt("iters"), it.optString("trainer", "brush"))
+    }
+} catch (e: Exception) {
+    null
 }
 
 /** Persist a user-chosen display name for a scan (blank → revert to the date). */

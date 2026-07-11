@@ -37,13 +37,14 @@ import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
-import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.UnavailableException
 import com.teapotlab.rumahku.ar.ArRenderer
 import com.teapotlab.rumahku.ar.TsdfVolume
 import com.teapotlab.rumahku.ar.DisplayRotationHelper
 import com.teapotlab.rumahku.capture.CaptureProgress
 import com.teapotlab.rumahku.capture.CaptureSession
+import com.teapotlab.rumahku.capture.SharedCameraController
+import java.util.EnumSet
 
 /**
  * The live scanning screen.
@@ -56,7 +57,12 @@ import com.teapotlab.rumahku.capture.CaptureSession
 class CaptureActivity : ComponentActivity() {
 
     private var session: Session? = null
+    private var sharedCameraController: SharedCameraController? = null
     private var installRequested = false
+    // The shared camera opens only once BOTH the Activity is resumed and the GL
+    // camera texture exists — either can happen first, so we track both.
+    @Volatile private var glTextureReady = -1
+    private var resumed = false
 
     private lateinit var glSurfaceView: GLSurfaceView
     private lateinit var displayRotationHelper: DisplayRotationHelper
@@ -82,13 +88,21 @@ class CaptureActivity : ComponentActivity() {
         glSurfaceView = GLSurfaceView(this).apply {
             preserveEGLContextOnPause = true
             setEGLContextClientVersion(3)
-            setEGLConfigChooser(8, 8, 8, 8, 16, 0)
+            // 0 alpha bits on purpose: requesting an alpha channel makes the
+            // GLSurfaceView a translucent overlay that SurfaceFlinger blends over
+            // the window behind it, so the opaque depth mesh renders see-through.
+            setEGLConfigChooser(8, 8, 8, 0, 16, 0)
             setRenderer(
                 ArRenderer(
                     sessionProvider = { session },
                     displayRotationHelper = displayRotationHelper,
                     tsdf = tsdf,
                     onFrame = ::onFrame,
+                    onGlReady = { id ->
+                        glTextureReady = id
+                        runOnUiThread { maybeOpenCamera() }
+                    },
+                    wireframeMesh = Settings.wireframeMesh(this@CaptureActivity),
                 )
             )
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
@@ -149,9 +163,30 @@ class CaptureActivity : ComponentActivity() {
                     }
                     ArCoreApk.InstallStatus.INSTALLED -> { /* ready */ }
                 }
-                session = Session(this).also { s ->
-                    selectHighestResCameraConfig(s)
-                    configureSession(s)
+                // SHARED_CAMERA lets us drive Camera2 (fast shutter + AE/AWB lock)
+                // alongside ARCore — see SharedCameraController.
+                val s = Session(this, EnumSet.of(Session.Feature.SHARED_CAMERA))
+                val highRes = Settings.highResCapture(this)
+                // High-res: use the DEFAULT (small/VGA) CPU config so ARCore folds
+                // acquireCameraImage into its 640x480 motion stream and opens NO
+                // extra surface — freeing a camera-stream slot for the big JPEG.
+                // (ARCore depth is software depth-from-motion on Pixel 6, so it
+                // costs no stream slot and stays on — the live mesh still works.)
+                if (highRes) selectDefaultCpuCameraConfig(s) else selectHighestResCameraConfig(s)
+                configureSession(s)
+                session = s
+                val ctrl = SharedCameraController(
+                    this, s, s.sharedCamera, s.cameraConfig.cameraId, highRes = highRes,
+                    onArCoreResumed = { Log.i(TAG, "ARCore resumed via shared camera") },
+                )
+                sharedCameraController = ctrl
+                // Wire high-res keyframe capture if enabled + the device offers it.
+                val hrSize = ctrl.highResSize
+                if (highRes && hrSize != null) {
+                    captureSession.highResW = hrSize.width
+                    captureSession.highResH = hrSize.height
+                    captureSession.highResGrabber = { cb -> ctrl.grabHighRes(cb) }
+                    Log.i(TAG, "high-res keyframes: ${hrSize.width}x${hrSize.height}")
                 }
             } catch (e: UnavailableException) {
                 Log.e(TAG, "ARCore session unavailable", e)
@@ -161,32 +196,37 @@ class CaptureActivity : ComponentActivity() {
             }
         }
 
-        try {
-            session?.resume()
-        } catch (e: CameraNotAvailableException) {
-            Log.e(TAG, "camera not available on resume", e)
-            Toast.makeText(this, "Camera not available", Toast.LENGTH_LONG).show()
-            session = null
-            finish()
-            return
-        }
-
+        resumed = true
         glSurfaceView.onResume()
         displayRotationHelper.onResume()
+        // The controller opens the camera + resumes ARCore once the GL texture is
+        // ready (it may already be, on a second resume).
+        maybeOpenCamera()
+    }
+
+    /** Open the shared camera when the Activity is resumed AND the GL camera
+     *  texture exists (either can happen first). Idempotent. */
+    private fun maybeOpenCamera() {
+        val ctrl = sharedCameraController ?: return
+        if (resumed && glTextureReady > 0) ctrl.start(glTextureReady)
     }
 
     override fun onPause() {
         super.onPause()
+        resumed = false
         // Flush any in-progress capture so nothing is lost when leaving.
         if (captureSession.isCapturing()) captureSession.stop()
         if (session != null) {
             displayRotationHelper.onPause()
             glSurfaceView.onPause()
-            session?.pause()
+            // Closes the Camera2 device and pauses the ARCore session.
+            sharedCameraController?.close()
         }
     }
 
     override fun onDestroy() {
+        sharedCameraController?.close()
+        sharedCameraController = null
         session?.close()
         session = null
         super.onDestroy()
@@ -217,8 +257,8 @@ class CaptureActivity : ComponentActivity() {
             // intrinsics across frames — both matter a lot for 3DGS/SfM quality.
             focusMode = Config.FocusMode.FIXED
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-            // Depth-from-motion powers the Polycam-style coverage overlay
-            // (TsdfVolume). Degrade gracefully where it isn't supported.
+            // Depth-from-motion powers the coverage overlay. On Pixel 6 it's
+            // software (no camera stream), so it stays on even in high-res mode.
             depthMode = if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
                 Config.DepthMode.AUTOMATIC
             } else {
@@ -227,6 +267,28 @@ class CaptureActivity : ComponentActivity() {
             }
         }
         session.configure(config)
+    }
+
+    /** High-res mode: pick the smallest-CPU config (so ARCore reuses its motion
+     *  stream for acquireCameraImage() and opens no 3rd camera surface, freeing a
+     *  slot for the app JPEG) while keeping the GPU texture as large as offered. */
+    private fun selectDefaultCpuCameraConfig(session: Session) {
+        try {
+            val cfgs = session.getSupportedCameraConfigs(CameraConfigFilter(session))
+            val best = cfgs.minWithOrNull(
+                compareBy(
+                    { it.imageSize.width * it.imageSize.height },       // smallest CPU image
+                    { -(it.textureSize.width * it.textureSize.height) }, // then largest GPU texture
+                ),
+            )
+            if (best != null) {
+                session.cameraConfig = best
+                Log.i(TAG, "high-res config: CPU ${best.imageSize.width}x${best.imageSize.height} " +
+                    "GPU ${best.textureSize.width}x${best.textureSize.height}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "default CPU config select failed", e)
+        }
     }
 
     private fun hasCameraPermission(): Boolean =

@@ -83,7 +83,9 @@ See [`docs/BACKEND.md`](docs/BACKEND.md) for the architecture and
 - [`docs/BACKEND.md`](docs/BACKEND.md) — hybrid cloud reconstruction
 - **Reference** (`docs/reference/`) — industry surveys guiding the target architecture:
   - [`capture-coverage-visualization.md`](docs/reference/capture-coverage-visualization.md) — live coverage overlay UX
+  - [`on-device-tsdf-fusion.md`](docs/reference/on-device-tsdf-fusion.md) — ARCore-depth TSDF + Mobile3DRecon for the live coverage mesh
   - [`pipeline-tuning-guide.md`](docs/reference/pipeline-tuning-guide.md) — RGB→SfM→3DGS→mesh/floor-plan tuning
+  - [`gaussian-splat-quality-qa.md`](docs/reference/gaussian-splat-quality-qa.md) — 3DGS quality gating (PSNR/SSIM/LPIPS, geometry, metric accuracy)
   - [`production-architecture.md`](docs/reference/production-architecture.md) — end-to-end cloud platform
 - [`docs/MILESTONES.md`](docs/MILESTONES.md) — roadmap / milestones
 - [`TODO.md`](TODO.md) — upcoming work
