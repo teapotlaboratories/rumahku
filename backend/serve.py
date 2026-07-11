@@ -249,18 +249,45 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
     # part of the nerfstudio image).
     with open(os.path.join(ds_dir, "_prep.py"), "w") as pf:
         pf.write(_SPLAT_PREP_PY)
-    # ns-train, then ns-eval for a held-out PSNR/SSIM, then export the .ply.
-    # Splatfacto's viewer path skips eval during training and its console never
-    # prints eval PSNR (it goes to tensorboard), so we can't stream PSNR like
-    # Brush does — instead ns-eval computes it once at the end into metrics.json,
-    # which we parse below. `|| true` keeps a metrics hiccup from failing the build.
+    # colmap_refine.py runs inside the nerfstudio container (which has COLMAP +
+    # numpy), so drop a copy into the mounted dataset dir.
+    shutil.copy(REFINE_SCRIPT, os.path.join(ds_dir, "colmap_refine.py"))
+    # Quality config, A/B-validated on real captures — two fixes took splatfacto
+    # from a hazy sub-Brush splat to matching Brush:
+    #  (1) DE-HAZE (opacity 0.26 -> 0.98): 30k iters (splatfacto's schedule is
+    #      30k-tuned; 15k skips the opacity-settle phase — the app requests 15k so
+    #      we floor it), use-bilateral-grid (per-frame auto-exposure/AWB drift),
+    #      color-corrected-metrics (grid is train-only, so held-out PSNR needs an
+    #      affine colour match — reports cc_psnr), default cull (0.005 kept
+    #      floaters), NO camera-optimizer (drifts the good ARCore poses).
+    #  (2) SfM INIT (cc_psnr 20.2 -> 23.5, the reference config + biggest lever):
+    #      colmap_refine.py builds a BA-refined pose model + a dense ~90k-point
+    #      triangulated cloud, then we train via the `colmap` dataparser instead of
+    #      raw ARCore poses + the sparse seed. Fall back to nerfstudio-data if
+    #      COLMAP can't register the scan, so a refine hiccup never blocks a build.
+    # ns-eval writes held-out PSNR/SSIM to metrics.json (`|| true` tolerates a
+    # hiccup); then export the .ply.
+    sf_iters = max(iters, 30000)
+    model = (
+        "--pipeline.model.use-bilateral-grid True "
+        "--pipeline.model.color-corrected-metrics True "
+        "--pipeline.model.use-scale-regularization True "
+        "--pipeline.model.rasterize-mode antialiased "
+        "--pipeline.model.densify-grad-thresh 0.0006"
+    )
+    base = (f"ns-train splatfacto --output-dir /ws/ns_out "
+            f"--max-num-iterations {sf_iters} --viewer.quit-on-train-completion True {model}")
     inner = (
         "set -e; "
         f"python3 /ws/_prep.py {max_res}; "
-        f"ns-train splatfacto --data /ws --output-dir /ws/ns_out "
-        f"--max-num-iterations {iters} --viewer.quit-on-train-completion True "
-        f"--pipeline.model.cull_alpha_thresh 0.005 "
-        f"nerfstudio-data --downscale-factor 1 --eval-mode fraction; "
+        "python3 /ws/colmap_refine.py /ws || true; "
+        "if [ -f /ws/colmap/refined_ds/sparse/0/points3D.bin ]; then "
+        f"  {base} --data /ws/colmap/refined_ds colmap --colmap-path sparse/0 "
+        "--images-path images --downscale-factor 1 --load-3D-points True; "
+        "else "
+        f"  {base} --data /ws nerfstudio-data --downscale-factor 1 "
+        "--load-3D-points True --eval-mode fraction; "
+        "fi; "
         "CFG=$(find /ws/ns_out -name config.yml | head -1); "
         "ns-eval --load-config \"$CFG\" --output-path /ws/ns_out/metrics.json || true; "
         "ns-export gaussian-splat --load-config \"$CFG\" --output-dir /ws/ns_out/export"
@@ -303,11 +330,16 @@ def _read_ns_metrics(job_id: str, metrics_path: str):
     try:
         with open(metrics_path) as f:
             res = json.load(f).get("results", {})
+        # Prefer the colour-corrected metrics: with the bilateral grid (train-only),
+        # raw held-out PSNR is exposure-penalised; cc_psnr is the meaningful, fair
+        # number. Falls back to raw psnr/ssim when cc_* isn't present.
+        psnr = res.get("cc_psnr", res.get("psnr"))
+        ssim = res.get("cc_ssim", res.get("ssim"))
         with LOCK:
-            if res.get("psnr") is not None:
-                JOBS[job_id]["psnr"] = float(res["psnr"])
-            if res.get("ssim") is not None:
-                JOBS[job_id]["ssim"] = float(res["ssim"])
+            if psnr is not None:
+                JOBS[job_id]["psnr"] = float(psnr)
+            if ssim is not None:
+                JOBS[job_id]["ssim"] = float(ssim)
     except (OSError, ValueError, TypeError):
         pass
 
