@@ -277,16 +277,22 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
     )
     base = (f"ns-train splatfacto --output-dir /ws/ns_out "
             f"--max-num-iterations {sf_iters} --viewer.quit-on-train-completion True {model}")
+    # Keep the model in ARCore-METRIC coordinates: nerfstudio's dataparsers
+    # normalize poses into a unit box by default (auto_scale_poses / center /
+    # orientation), which silently strips the metric scale the ARCore poses carry
+    # — so the exported .ply wouldn't be in meters and any measurement would be
+    # wrong. Disabling all three preserves scale (Brush keeps it implicitly).
+    scale = "--auto-scale-poses False --center-method none --orientation-method none"
     inner = (
         "set -e; "
         f"python3 /ws/_prep.py {max_res}; "
         "python3 /ws/colmap_refine.py /ws || true; "
         "if [ -f /ws/colmap/refined_ds/sparse/0/points3D.bin ]; then "
         f"  {base} --data /ws/colmap/refined_ds colmap --colmap-path sparse/0 "
-        "--images-path images --downscale-factor 1 --load-3D-points True; "
+        f"--images-path images --downscale-factor 1 --load-3D-points True {scale}; "
         "else "
         f"  {base} --data /ws nerfstudio-data --downscale-factor 1 "
-        "--load-3D-points True --eval-mode fraction; "
+        f"--load-3D-points True --eval-mode fraction {scale}; "
         "fi; "
         "CFG=$(find /ws/ns_out -name config.yml | head -1); "
         "ns-eval --load-config \"$CFG\" --output-path /ws/ns_out/metrics.json || true; "
@@ -313,7 +319,8 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
             JOBS[job_id].update(state="error", error=f"splatfacto spawn: {e}")
         return
     if rc == 0:
-        _read_ns_metrics(job_id, os.path.join(out_dir, "metrics.json"))  # final PSNR/SSIM
+        _read_sfm_stats(job_id, log_path)                                # SfM health first
+        _read_ns_metrics(job_id, os.path.join(out_dir, "metrics.json"))  # PSNR/SSIM/LPIPS + verdict
     plys = sorted(glob.glob(os.path.join(out_dir, "export", "*.ply")))
     with LOCK:
         if JOBS[job_id].get("state") == "cancelled":
@@ -324,6 +331,41 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
             JOBS[job_id].update(state="error", error=f"splatfacto exit {rc}; {_log_tail(log_path)}")
 
 
+def _quality_verdict(psnr, ssim, sfm=None):
+    """Advisory accept-band from held-out metrics + SfM health, banded for our
+    phone-capture regime (cc_psnr typically ~18-24). NOT a hard gate — a hint to
+    the user whether a re-scan is worth it. 'review' when SfM matching looks thin
+    (a capture problem no trainer can fix)."""
+    if psnr is None:
+        return None
+    reproj = (sfm or {}).get("reproj")
+    if reproj is not None and reproj > 1.5:        # >1.5px mean reproj = poor matches
+        return "review"
+    if psnr >= 22.0 and (ssim is None or ssim >= 0.65):
+        return "good"
+    if psnr >= 18.0:
+        return "fair"
+    return "poor"
+
+
+def _read_sfm_stats(job_id, log_path):
+    """Parse the SfM-health line colmap_refine.py emits (triangulated points / mean
+    reprojection error / mean track length) — the earliest predictor of a bad
+    reconstruction. Best-effort; absent for the nerfstudio-data fallback path."""
+    try:
+        with open(log_path, "rb") as f:
+            tail = f.read()[-20000:].decode("utf-8", "replace")
+    except OSError:
+        return
+    m = re.search(r"SFMSTATS points=(\d+) reproj=([\d.]+) track=([\d.]+)", tail)
+    if not m:
+        return
+    with LOCK:
+        JOBS[job_id]["sfm"] = {
+            "points": int(m.group(1)), "reproj": float(m.group(2)), "track": float(m.group(3)),
+        }
+
+
 def _read_ns_metrics(job_id: str, metrics_path: str):
     """Pull final PSNR/SSIM from an ns-eval metrics.json into the job (best-effort;
     Splatfacto's only quality readout, computed once after training)."""
@@ -331,15 +373,21 @@ def _read_ns_metrics(job_id: str, metrics_path: str):
         with open(metrics_path) as f:
             res = json.load(f).get("results", {})
         # Prefer the colour-corrected metrics: with the bilateral grid (train-only),
-        # raw held-out PSNR is exposure-penalised; cc_psnr is the meaningful, fair
-        # number. Falls back to raw psnr/ssim when cc_* isn't present.
+        # raw held-out PSNR is exposure-penalised; cc_* is the meaningful, fair
+        # number. Falls back to raw when cc_* isn't present. LPIPS correlates best
+        # with human perception, so surface it too (ns-eval already computes it).
         psnr = res.get("cc_psnr", res.get("psnr"))
         ssim = res.get("cc_ssim", res.get("ssim"))
+        lpips = res.get("cc_lpips", res.get("lpips"))
         with LOCK:
             if psnr is not None:
                 JOBS[job_id]["psnr"] = float(psnr)
             if ssim is not None:
                 JOBS[job_id]["ssim"] = float(ssim)
+            if lpips is not None:
+                JOBS[job_id]["lpips"] = float(lpips)
+            JOBS[job_id]["verdict"] = _quality_verdict(
+                JOBS[job_id].get("psnr"), JOBS[job_id].get("ssim"), JOBS[job_id].get("sfm"))
     except (OSError, ValueError, TypeError):
         pass
 
@@ -460,6 +508,12 @@ class Handler(BaseHTTPRequestHandler):
             if j.get("psnr") is not None:
                 out["psnr"] = round(j["psnr"], 2)
                 out["ssim"] = round(j.get("ssim", 0.0), 3)
+                if j.get("lpips") is not None:
+                    out["lpips"] = round(j["lpips"], 3)
+                if j.get("verdict"):
+                    out["verdict"] = j["verdict"]   # good | fair | poor | review
+                if j.get("sfm"):
+                    out["sfm"] = j["sfm"]            # {points, reproj, track}
             if j.get("error"):
                 out["error"] = j["error"]
             return self._json(200, out)
