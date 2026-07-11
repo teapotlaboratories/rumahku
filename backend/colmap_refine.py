@@ -129,6 +129,22 @@ def refine(ds):
     _run(["colmap", "bundle_adjuster", "--input_path", tri,
           "--output_path", sparse0], log)
 
+    # SfM health (QA gate) — triangulated points / mean reprojection error / mean
+    # track length are the earliest predictors of a bad reconstruction. Emit a
+    # machine-readable line the backend parses; never fail the refine over it.
+    try:
+        import re as _re
+        an = subprocess.run(["colmap", "model_analyzer", "--path", sparse0],
+                            capture_output=True, text=True)
+        txt = an.stderr + an.stdout
+        pts = _re.search(r"Points:\s*(\d+)", txt)
+        rep = _re.search(r"Mean reprojection error:\s*([\d.]+)", txt)
+        trk = _re.search(r"Mean track length:\s*([\d.]+)", txt)
+        print("SFMSTATS points=%s reproj=%s track=%s" % (
+            pts.group(1) if pts else 0, rep.group(1) if rep else 0, trk.group(1) if trk else 0))
+    except Exception as e:  # noqa: BLE001
+        print("SFMSTATS points=0 reproj=0 track=0 err=%s" % e)
+
     # Brush reads a colmap dataset as <dir>/{images,sparse/0}. Symlink the images
     # in rather than copy (they can be hundreds of MB).
     link = os.path.join(refined, "images")

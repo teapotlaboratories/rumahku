@@ -52,11 +52,17 @@ object CloudBuild {
 
             var psnr = -1.0
             var ssim = -1.0
+            var lpips = -1.0
+            var verdict = ""
+            var sfm: JSONObject? = null
             while (true) {
                 val st = getStatus(jobId, baseUrl)
                 if (st.has("psnr")) {          // held-out quality (present once evaluated)
                     psnr = st.optDouble("psnr", psnr)
                     ssim = st.optDouble("ssim", ssim)
+                    lpips = st.optDouble("lpips", lpips)   // lower is better (perceptual)
+                    verdict = st.optString("verdict", verdict)
+                    st.optJSONObject("sfm")?.let { sfm = it }
                 }
                 when (st.optString("state")) {
                     "done" -> break
@@ -91,7 +97,7 @@ object CloudBuild {
             val out = File(scanDir, "splat/cloud.ply")
             out.parentFile?.mkdirs()
             downloadResult(jobId, baseUrl, out)
-            if (psnr > 0) writeMetrics(scanDir, psnr, ssim, iters, trainer)
+            if (psnr > 0) writeMetrics(scanDir, psnr, ssim, lpips, verdict, sfm, iters, trainer)
             onProgress(Progress("Done"))
             out
         } finally {
@@ -101,10 +107,14 @@ object CloudBuild {
 
     /** Persist held-out quality metrics next to the scan so the home screen can
      *  show them after the fact (the in-memory JobState doesn't survive restart). */
-    private fun writeMetrics(scanDir: File, psnr: Double, ssim: Double, iters: Int, trainer: String) {
+    private fun writeMetrics(scanDir: File, psnr: Double, ssim: Double, lpips: Double,
+                             verdict: String, sfm: JSONObject?, iters: Int, trainer: String) {
         try {
             val o = JSONObject()
                 .put("psnr", psnr).put("ssim", ssim).put("iters", iters).put("trainer", trainer)
+            if (lpips >= 0) o.put("lpips", lpips)          // perceptual, lower = better
+            if (verdict.isNotEmpty()) o.put("verdict", verdict)   // good|fair|poor|review
+            if (sfm != null) o.put("sfm", sfm)             // {points, reproj, track}
             File(scanDir, METRICS_NAME).writeText(o.toString())
         } catch (e: Exception) {
             Log.w(TAG, "metrics write failed: ${e.message}")

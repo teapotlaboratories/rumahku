@@ -45,6 +45,15 @@ all one controlled A/B on the GPU box, same data/iters/eval-split):
 - [x] Splatfacto live progress + PSNR — parse ns-train's "N (pct%)" steps for a
       live ring; report final PSNR/SSIM via `ns-eval` (its eval is console-silent,
       so no per-step PSNR like Brush).
+- [x] **Quality gating (QA gate)** — backend surfaces LPIPS alongside PSNR/SSIM,
+      an advisory accept-band verdict (good/fair/poor/review), and SfM health
+      (triangulated points / mean reprojection error / track length via
+      `colmap model_analyzer`). The app shows them in the per-scan metrics dialog
+      so a thin/poor capture is flagged for a re-scan instead of silently shipping.
+- [x] **Preserve metric scale** — disable nerfstudio pose normalization on both
+      dataparser paths (`--auto-scale-poses False --center-method none
+      --orientation-method none`) so the exported `.ply` stays in ARCore meters —
+      prerequisite for in-app measurements (see production-architecture note).
 - [ ] Intrinsics / lens distortion (OPENCV camera model vs pinhole).
 
 Infra note: the **RTX 5060 Ti (GPU1) can't run the nerfstudio CUDA-11.8 image**

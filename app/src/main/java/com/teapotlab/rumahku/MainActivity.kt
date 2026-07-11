@@ -107,7 +107,13 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class ScanStatus { READY, CAPTURED }
-private class ScanMetrics(val psnr: Double, val ssim: Double, val iters: Int, val trainer: String)
+private class ScanMetrics(
+    val psnr: Double, val ssim: Double, val iters: Int, val trainer: String,
+    val lpips: Double = -1.0,        // perceptual distance, lower = better (-1 = absent)
+    val verdict: String = "",        // good | fair | poor | review (from the backend QA gate)
+    val sfmPoints: Int = 0,          // COLMAP triangulated points (0 = no SfM stats)
+    val sfmReproj: Double = 0.0,     // mean reprojection error, px
+)
 private class Scan(
     val dir: File, val title: String, val thumb: File?, val status: ScanStatus,
     val metrics: ScanMetrics? = null,
@@ -354,11 +360,26 @@ private fun HomeScreen() {
                         "held-out PSNR/SSIM will appear here.")
                 } else {
                     Column {
+                        if (m.verdict.isNotEmpty()) {
+                            val (vlabel, vcolor) = when (m.verdict) {
+                                "good" -> "Good quality" to Color(0xFF2E7D32)
+                                "fair" -> "Fair quality" to Color(0xFFF9A825)
+                                "review" -> "Needs review" to Color(0xFFEF6C00)
+                                else -> "Poor quality" to MaterialTheme.colorScheme.error
+                            }
+                            Text(vlabel, color = vcolor, fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(bottom = 6.dp))
+                        }
                         MetricRow("PSNR", "%.2f dB".format(m.psnr))
                         MetricRow("SSIM", "%.3f".format(m.ssim))
+                        if (m.lpips >= 0) MetricRow("LPIPS", "%.3f".format(m.lpips))
                         MetricRow("Trainer", m.trainer.replaceFirstChar { it.uppercase() })
                         MetricRow("Iterations", "%,d".format(m.iters))
-                        Text("Measured on held-out views — higher = closer to the real photos.",
+                        if (m.sfmPoints > 0)
+                            MetricRow("SfM", "%,d pts · %.2f px".format(m.sfmPoints, m.sfmReproj))
+                        Text("Measured on held-out views — higher PSNR/SSIM and lower LPIPS = " +
+                            "closer to the real photos.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 10.dp))
@@ -741,8 +762,13 @@ private fun loadScans(context: Context): List<Scan> {
 private fun loadMetrics(dir: File): ScanMetrics? = try {
     val f = File(dir, CloudBuild.METRICS_NAME)
     if (!f.exists()) null else org.json.JSONObject(f.readText()).let {
+        val sfm = it.optJSONObject("sfm")
         ScanMetrics(it.optDouble("psnr"), it.optDouble("ssim"),
-            it.optInt("iters"), it.optString("trainer", "brush"))
+            it.optInt("iters"), it.optString("trainer", "brush"),
+            lpips = it.optDouble("lpips", -1.0),
+            verdict = it.optString("verdict", ""),
+            sfmPoints = sfm?.optInt("points") ?: 0,
+            sfmReproj = sfm?.optDouble("reproj") ?: 0.0)
     }
 } catch (e: Exception) {
     null
