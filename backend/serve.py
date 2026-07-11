@@ -9,6 +9,9 @@ uploaded dataset. Endpoints:
   POST /jobs?iters=2000&max_res=1024   body = dataset.zip  -> {"job_id": "..."}
       the zip must contain a nerfstudio dataset (transforms.json + images/,
       optional seed.ply), at the root or in a single subfolder.
+      ?refine=colmap runs COLMAP pose-prior refinement first (denser SfM init +
+      refined poses, ~+0.3 dB / +0.04 SSIM; see backend/colmap_refine.py) —
+      Brush trainer only, adds ~5 min.
   GET  /jobs/{id}                       -> {"state": queued|running|done|error,
                                             "elapsed": s, "iter": n, ...}
   GET  /jobs/{id}/result                -> the exported .ply (octet-stream)
@@ -51,12 +54,60 @@ HOST_EXEC = os.environ.get("HOST_EXEC", shutil.which("distrobox-host-exec") or "
 # nerfstudio (Splatfacto/gsplat) runs from its official Docker image on the GPU
 # via podman — it has CUDA + gsplat prebuilt, avoiding an in-container install.
 NERF_IMAGE = os.environ.get("NERF_IMAGE", "ghcr.io/nerfstudio-project/nerfstudio:latest")
+
+# Resolution-cap pre-step for splatfacto, run inside the nerfstudio container
+# (Pillow ships with it). gsplat rasterizes at full image resolution, so we cap
+# the longest side to max_res and scale the shared transforms.json intrinsics to
+# match — keeping geometry consistent — before ns-train. Idempotent: if the
+# dataset is already within max_res it does nothing, so a rebuild is safe.
+_SPLAT_PREP_PY = r'''
+import json, glob, sys
+from PIL import Image
+try:
+    RESAMPLE = Image.Resampling.LANCZOS
+except AttributeError:
+    RESAMPLE = Image.LANCZOS
+M = int(sys.argv[1]) if len(sys.argv) > 1 else 1024
+tf = "/ws/transforms.json"
+d = json.load(open(tf))
+W, H = int(d.get("w", 0)), int(d.get("h", 0))
+L = max(W, H)
+f = (L / M) if (L > M and L > 0) else 1.0
+if f > 1.0:
+    for k in ("fl_x", "fl_y", "cx", "cy"):
+        if k in d:
+            d[k] = d[k] / f
+    nW, nH = round(W / f), round(H / f)
+    d["w"], d["h"] = nW, nH
+    json.dump(d, open(tf, "w"))
+    n = 0
+    for p in glob.glob("/ws/images/*"):
+        try:
+            Image.open(p).convert("RGB").resize((nW, nH), RESAMPLE).save(p)
+            n += 1
+        except Exception as e:
+            print("prep skip", p, e)
+    print("splatfacto res cap: %dx%d (factor %.2f), %d images" % (nW, nH, f, n))
+else:
+    print("splatfacto res cap: none (%dx%d <= %d)" % (W, H, M))
+'''
+# Optional COLMAP pose-prior refinement (see backend/colmap_refine.py), enabled
+# per-request with ?refine=colmap. It runs in-process (colmap + numpy live in the
+# container; only Brush needs the host), producing a refined SfM-seeded model
+# that Brush trains on for higher quality.
+REFINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "colmap_refine.py")
 os.makedirs(JOBS_DIR, exist_ok=True)
 
 JOBS = {}            # job_id -> {state, queued_at, started, iter, total, error, ply}
 LOCK = threading.Lock()
 WORK_Q = queue.Queue()   # (job_id, ds_dir, iters, max_res) awaiting a worker
-ITER_RE = re.compile(rb"iter[=\s]+(\d+)")
+ITER_RE = re.compile(rb"iter[=\s]+(\d+)")            # Brush:      "iter=1234"
+# Splatfacto/ns-train prints a live rich table whose rows look like
+# "1230 (12.30%)   4.5 ms   ...". Match the leading step + its "(NN.NN%)" so we
+# don't pick up the timing/gaussian-count columns. The two patterns are disjoint
+# (a Brush log has no "(NN.NN%)"; an ns-train log has no "iter="), so a job's log
+# only ever matches one.
+STEP_RE = re.compile(rb"(\d+)\s*\(\d+(?:\.\d+)?%\)")  # Splatfacto: "1230 (12.30%)"
 PSNR_RE = re.compile(rb"PSNR\s+([\d.]+)\s+SSIM\s+([\d.]+)")
 
 
@@ -64,7 +115,7 @@ def _worker():
     """Pull queued jobs and train them one at a time (per worker), so many
     concurrent uploads don't thrash the GPU — they queue instead."""
     while True:
-        job_id, ds_dir, iters, max_res, eval_split, trainer = WORK_Q.get()
+        job_id, ds_dir, iters, max_res, eval_split, trainer, refine = WORK_Q.get()
         try:
             with LOCK:
                 j = JOBS.get(job_id)
@@ -74,7 +125,7 @@ def _worker():
             if trainer == "splatfacto":
                 _run_splatfacto(job_id, ds_dir, iters, max_res, eval_split)
             else:
-                _run_job(job_id, ds_dir, iters, max_res, eval_split)
+                _run_job(job_id, ds_dir, iters, max_res, eval_split, refine)
         finally:
             WORK_Q.task_done()
 
@@ -92,12 +143,50 @@ def _queue_position(job_id: str) -> int:
     return ahead + 1
 
 
-def _run_job(job_id: str, ds_dir: str, iters: int, max_res: int, eval_split: int = 0):
+def _colmap_refine(job_id: str, ds_dir: str):
+    """Run COLMAP pose-prior refinement before training. Returns the refined
+    colmap-model dir (with images/ + sparse/0), or None to fall back to the raw
+    ARCore poses. Runs in-process (colmap + numpy live in the container). The
+    process is tracked so a DELETE can cancel it mid-refine."""
+    log_path = os.path.join(ds_dir, "refine.log")
+    with LOCK:
+        JOBS[job_id]["phase"] = "refine"
+    cmd = ["python3", REFINE_SCRIPT, ds_dir]
+    try:
+        with open(log_path, "wb") as lf:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
+                                    cwd=ds_dir, text=True)
+        with LOCK:
+            JOBS[job_id]["proc"] = proc
+        out, _ = proc.communicate()
+        rc = proc.returncode
+    except Exception:  # noqa: BLE001
+        rc, out = 1, ""
+    with LOCK:
+        JOBS[job_id]["phase"] = None
+    if rc != 0:
+        return None
+    for line in reversed(out.splitlines()):
+        if line.startswith("REFINED "):
+            return line[len("REFINED "):].strip()
+    return None
+
+
+def _run_job(job_id: str, ds_dir: str, iters: int, max_res: int,
+             eval_split: int = 0, refine: str = ""):
     out_dir = os.path.join(ds_dir, "out")
     os.makedirs(out_dir, exist_ok=True)
     log_path = os.path.join(ds_dir, "brush.log")
+    # Optionally refine poses first; on failure fall back to the raw dataset so a
+    # refine hiccup never blocks a build. Output/logs stay under ds_dir either way.
+    train_dir = ds_dir
+    if refine == "colmap":
+        train_dir = _colmap_refine(job_id, ds_dir) or ds_dir
+        with LOCK:
+            if JOBS[job_id].get("state") == "cancelled":
+                return  # cancelled during refine
     brush_cmd = [
-        BRUSH, ds_dir,
+        BRUSH, train_dir,
         "--total-train-iters", str(iters),
         "--max-resolution", str(max_res),
         "--export-every", str(iters),
@@ -150,17 +239,36 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
     out_dir = os.path.join(ds_dir, "ns_out")
     log_path = os.path.join(ds_dir, "brush.log")   # shared log path (status polls it)
     os.makedirs(out_dir, exist_ok=True)
+    # Cap image resolution to max_res BEFORE training. gsplat rasterizes at full
+    # image resolution, so high-res (9 MP) keyframes blow past a ~10 GB GPU and OOM
+    # — unlike Brush, which honours --max-resolution. Splatfacto ignored max_res
+    # (it hardcoded --downscale-factor 1), so we do the cap ourselves: downscale
+    # every image and scale the shared intrinsics in transforms.json to match, so
+    # geometry stays consistent. Idempotent (skips when already <= max_res), so a
+    # rebuild on an already-capped dataset is a no-op. Runs in-container (Pillow is
+    # part of the nerfstudio image).
+    with open(os.path.join(ds_dir, "_prep.py"), "w") as pf:
+        pf.write(_SPLAT_PREP_PY)
+    # ns-train, then ns-eval for a held-out PSNR/SSIM, then export the .ply.
+    # Splatfacto's viewer path skips eval during training and its console never
+    # prints eval PSNR (it goes to tensorboard), so we can't stream PSNR like
+    # Brush does — instead ns-eval computes it once at the end into metrics.json,
+    # which we parse below. `|| true` keeps a metrics hiccup from failing the build.
     inner = (
         "set -e; "
+        f"python3 /ws/_prep.py {max_res}; "
         f"ns-train splatfacto --data /ws --output-dir /ws/ns_out "
         f"--max-num-iterations {iters} --viewer.quit-on-train-completion True "
         f"--pipeline.model.cull_alpha_thresh 0.005 "
         f"nerfstudio-data --downscale-factor 1 --eval-mode fraction; "
         "CFG=$(find /ws/ns_out -name config.yml | head -1); "
+        "ns-eval --load-config \"$CFG\" --output-path /ws/ns_out/metrics.json || true; "
         "ns-export gaussian-splat --load-config \"$CFG\" --output-dir /ws/ns_out/export"
     )
     podman = [
         "podman", "run", "--rm", "--gpus", "all", "--security-opt=label=disable",
+        # expandable_segments cuts CUDA fragmentation OOMs (what the error suggested).
+        "-e", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
         "-v", f"{ds_dir}:/ws", NERF_IMAGE, "bash", "-lc", inner,
     ]
     cmd = ([HOST_EXEC] if HOST_EXEC else []) + podman
@@ -177,6 +285,8 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
         with LOCK:
             JOBS[job_id].update(state="error", error=f"splatfacto spawn: {e}")
         return
+    if rc == 0:
+        _read_ns_metrics(job_id, os.path.join(out_dir, "metrics.json"))  # final PSNR/SSIM
     plys = sorted(glob.glob(os.path.join(out_dir, "export", "*.ply")))
     with LOCK:
         if JOBS[job_id].get("state") == "cancelled":
@@ -187,19 +297,46 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
             JOBS[job_id].update(state="error", error=f"splatfacto exit {rc}; {_log_tail(log_path)}")
 
 
+def _read_ns_metrics(job_id: str, metrics_path: str):
+    """Pull final PSNR/SSIM from an ns-eval metrics.json into the job (best-effort;
+    Splatfacto's only quality readout, computed once after training)."""
+    try:
+        with open(metrics_path) as f:
+            res = json.load(f).get("results", {})
+        with LOCK:
+            if res.get("psnr") is not None:
+                JOBS[job_id]["psnr"] = float(res["psnr"])
+            if res.get("ssim") is not None:
+                JOBS[job_id]["ssim"] = float(res["ssim"])
+    except (OSError, ValueError, TypeError):
+        pass
+
+
 def _update_iter(job_id: str, log_path: str):
     try:
         with open(log_path, "rb") as f:
             f.seek(max(0, os.path.getsize(log_path) - 16384))
             tail = f.read()
-        m = ITER_RE.findall(tail)
+        # Brush emits "iter=N"; Splatfacto emits "N (pct%)". Try Brush first, then
+        # fall back to the ns-train step so both trainers report live progress.
+        m = ITER_RE.findall(tail) or STEP_RE.findall(tail)
         p = PSNR_RE.findall(tail)
+        # Splatfacto's post-training phases print no iteration count, so training
+        # sits at 100% for ~1-2 min through eval + export and looks frozen. Detect
+        # the log markers and surface a phase so the UI shows real activity.
+        phase = None
+        if b"Saved results to" in tail:      # ns-eval finished → ns-export writing ply
+            phase = "export"
+        elif b"Training Finished" in tail:   # ns-train finished → ns-eval running
+            phase = "eval"
         with LOCK:
             if m:
                 JOBS[job_id]["iter"] = int(m[-1])
             if p:
                 JOBS[job_id]["psnr"] = float(p[-1][0])
                 JOBS[job_id]["ssim"] = float(p[-1][1])
+            if phase:
+                JOBS[job_id]["phase"] = phase
     except OSError:
         pass
 
@@ -238,6 +375,7 @@ class Handler(BaseHTTPRequestHandler):
         max_res = int(q.get("max_res", ["1024"])[0])
         eval_split = int(q.get("eval_split", ["0"])[0])   # hold out every Nth view for PSNR
         trainer = q.get("trainer", ["brush"])[0]          # brush | splatfacto
+        refine = q.get("refine", [""])[0]                 # "" | colmap (pose-prior)
         n = int(self.headers.get("Content-Length", "0"))
         if n <= 0:
             return self._json(400, {"error": "empty body (expected dataset.zip)"})
@@ -255,7 +393,7 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             JOBS[job_id] = {"state": "queued", "queued_at": time.time(),
                             "started": None, "iter": 0, "total": iters, "trainer": trainer}
-        WORK_Q.put((job_id, root, iters, max_res, eval_split, trainer))
+        WORK_Q.put((job_id, root, iters, max_res, eval_split, trainer, refine))
         self._json(200, {"job_id": job_id})
 
     def do_GET(self):
@@ -285,6 +423,8 @@ class Handler(BaseHTTPRequestHandler):
                    "iter": j.get("iter", 0), "total": j.get("total", 0)}
             if j["state"] == "queued":
                 out["queue_pos"] = _queue_position(job_id)
+            if j.get("phase"):
+                out["phase"] = j["phase"]   # e.g. "refine" (COLMAP running)
             if j.get("psnr") is not None:
                 out["psnr"] = round(j["psnr"], 2)
                 out["ssim"] = round(j.get("ssim", 0.0), 3)
