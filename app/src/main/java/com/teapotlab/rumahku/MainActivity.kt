@@ -413,8 +413,8 @@ private fun HomeScreen() {
                     QualityOption("Cloud · High+", "6000 iters · COLMAP pose refine (+~5 min)") {
                         runCloud(6000, 1600, refine = "colmap")
                     }
-                    QualityOption("Cloud · Splatfacto", "experimental · pose-optimized") {
-                        runCloud(15000, 1600, trainer = "splatfacto")
+                    QualityOption("Cloud · Splatfacto", "experimental · COLMAP-SfM + de-haze · ~30 min") {
+                        runCloud(30000, 1600, trainer = "splatfacto")
                     }
                     // On-device is a single foreground build, so only for one scan.
                     if (!multi) {
