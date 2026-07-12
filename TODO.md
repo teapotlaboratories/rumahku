@@ -80,6 +80,17 @@ the RTX 3080 (GPU0). Brush (Vulkan) is unaffected.
 - [ ] On-device reconstruction cancel (cloud cancel exists; offline path doesn't).
 
 ## Resolved
+- [x] **Raw-PSNR reporting honesty** (backend + app) — the per-scan score now
+      reports **raw** held-out PSNR (what the exported `.ply` renders), not
+      `cc_psnr` (a train-only colour correction that overstates the export).
+      `cc_psnr` is kept as a labeled diagnostic when ns-eval emits it. See
+      `docs/worklog/2026-07-12.md` + `docs/design/quality-capture-mode.md`.
+- [x] **On-device resolution auto-adjust** (app) — replaced the hardcoded 720p
+      on-device `max_res` with a per-device ceiling: a RAM-tier table (Pixel 6 →
+      1024, ~12 GB → 1280) plus crash-survivable learning (a disk-committed attempt
+      marker detects a hard OOM-crash across runs and steps the ceiling down;
+      `known_good` decays; a strike counter tolerates one spurious kill). Pixel 6
+      OOM sweep: 1024 + 1280 both stable; in-app 1024 validated. `DeviceCapability.kt`.
 - [x] **Backend survives reboot** — persistent, enabled `systemd --user` service;
       verified by a live reboot (container + backend auto-recover, GPU intact).
 - [x] **Cloud GPU speed** — train on the host via `distrobox-host-exec` (~14–19×).

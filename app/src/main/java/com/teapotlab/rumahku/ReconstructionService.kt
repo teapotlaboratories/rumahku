@@ -15,6 +15,7 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -45,19 +46,31 @@ class ReconstructionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Satisfy the startForegroundService() contract before ANY early return, or
+        // the OS raises ForegroundServiceDidNotStartInTimeException on a repeat start
+        // of an already-running build.
+        startForeground(NOTIF_ID, notification("Reconstructing…", ongoing = true))
         val datasetDir = intent?.getStringExtra(EXTRA_DATASET)
         val iters = intent?.getIntExtra(EXTRA_ITERS, TOTAL_ITERS) ?: TOTAL_ITERS
         if (datasetDir == null) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
         if (_running.value) {
-            // Already building (e.g. the user tapped the building card) — don't
-            // start a second training thread; the UI just re-observes progress.
+            // Already building (e.g. the user tapped the building card) — don't start
+            // a second training thread; the UI just re-observes progress. Foreground
+            // is already satisfied above, so the running build keeps its notification.
             return START_NOT_STICKY
         }
 
-        startForeground(NOTIF_ID, notification("Starting…", ongoing = true))
+        // Auto-adjusted per-device resolution (see DeviceCapability). resolveForRun
+        // also reconciles a crash from a previous run (a hard OOM leaves no return
+        // value — only a persisted attempt marker — so we detect it here). curRes
+        // tracks the live resolution so the progress notification reflects a backoff.
+        val maxRes = DeviceCapability.resolveForRun(this)
+        val curRes = AtomicInteger(maxRes)
+        notify("Starting… (${maxRes}p)", ongoing = true)
         acquireWakeLock()
         _result.value = null
         cancelRequested = false
@@ -70,19 +83,51 @@ class ReconstructionService : Service() {
             val progress = thread(name = "recon-progress") {
                 try {
                     while (_running.value) {
-                        notify("Training… iter ${BrushTrainer.nativeCurrentIter()}, " +
+                        notify("Training… (${curRes.get()}p) iter ${BrushTrainer.nativeCurrentIter()}, " +
                             "${BrushTrainer.nativeCurrentSplats()} splats", ongoing = true)
                         Thread.sleep(1000)
                     }
                 } catch (_: InterruptedException) { /* stopping */ }
             }
 
-            val trained = try {
-                val outDir = File(datasetDir, "splat")
-                BrushTrainer.nativeTrain(datasetDir, outDir.absolutePath, iters, MAX_RES, MAX_FRAMES)
-            } catch (t: Throwable) {
-                Log.e(TAG, "nativeTrain failed", t)
-                "ERROR: ${t.message}"
+            // Train at the chosen resolution. If the trainer returns a *catchable*
+            // OOM (the rare non-crash variant), step down the ladder one rung at a
+            // time and retry, until it succeeds or hits the floor — each backoff is
+            // learned so the next build starts lower. A hard crash never reaches this
+            // loop; DeviceCapability recovers from that across runs via the marker.
+            val outDir = File(datasetDir, "splat")
+            val ctx = applicationContext
+            var res = maxRes
+            var trained: String
+            while (true) {
+                DeviceCapability.beginAttempt(ctx, res)
+                trained = try {
+                    BrushTrainer.nativeTrain(datasetDir, outDir.absolutePath, iters, res, MAX_FRAMES)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "nativeTrain failed", t)
+                    "ERROR: ${t.message}"
+                }
+                if (cancelRequested) {
+                    DeviceCapability.finishAttempt(ctx, res, DeviceCapability.Outcome.OTHER)
+                    break
+                }
+                val errored = trained.startsWith("ERROR")
+                if (errored && DeviceCapability.isOomError(trained)) {
+                    DeviceCapability.finishAttempt(ctx, res, DeviceCapability.Outcome.OOM)
+                    val lower = DeviceCapability.stepBelow(res)
+                    if (lower < res) {
+                        Log.w(TAG, "caught OOM at ${res}p → retrying at ${lower}p")
+                        res = lower
+                        curRes.set(res)   // progress notification now shows the lower res
+                        continue
+                    }
+                    break   // already at the floor; give up
+                }
+                DeviceCapability.finishAttempt(
+                    ctx, res,
+                    if (errored) DeviceCapability.Outcome.OTHER else DeviceCapability.Outcome.SUCCESS,
+                )
+                break
             }
             val out = if (cancelRequested) CANCELLED else trained
 
@@ -149,7 +194,8 @@ class ReconstructionService : Service() {
         // 2000 iters ≈ PSNR 24.8 (near the 25.9 off-device baseline) in ~7 min
         // on Mali at 24–28 °C (no throttling); 2000→3000 adds only +0.5 dB.
         const val TOTAL_ITERS = 2000
-        private const val MAX_RES = 720
+        // Resolution is now chosen per-device (RAM-tier + crash-learning); see
+        // DeviceCapability. Frame budget stays fixed — resolution is the memory lever.
         private const val MAX_FRAMES = 40
 
         private val _running = MutableStateFlow(false)

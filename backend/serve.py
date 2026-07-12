@@ -465,7 +465,8 @@ def _run_splatfacto(job_id: str, ds_dir: str, iters: int, max_res: int, eval_spl
 
 def _quality_verdict(psnr, ssim, sfm=None):
     """Advisory accept-band from held-out metrics + SfM health, banded for our
-    phone-capture regime (cc_psnr typically ~18-24). NOT a hard gate — a hint to
+    phone-capture regime on RAW held-out PSNR (typically ~18-24 — a good capture
+    reaches ~23-25, a poor one ~17-20). NOT a hard gate — a hint to
     the user whether a re-scan is worth it. 'review' when SfM matching looks thin
     (a capture problem no trainer can fix)."""
     if psnr is None:
@@ -504,13 +505,16 @@ def _read_ns_metrics(job_id: str, metrics_path: str):
     try:
         with open(metrics_path) as f:
             res = json.load(f).get("results", {})
-        # Prefer the colour-corrected metrics: with the bilateral grid (train-only),
-        # raw held-out PSNR is exposure-penalised; cc_* is the meaningful, fair
-        # number. Falls back to raw when cc_* isn't present. LPIPS correlates best
-        # with human perception, so surface it too (ns-eval already computes it).
-        psnr = res.get("cc_psnr", res.get("psnr"))
-        ssim = res.get("cc_ssim", res.get("ssim"))
-        lpips = res.get("cc_lpips", res.get("lpips"))
+        # Report the RAW held-out metrics as the headline score — that is what the
+        # EXPORTED .ply actually renders. cc_* (colour-corrected) is a TRAIN-ONLY
+        # reference: it fits a per-view affine colour match that hides the bilateral
+        # grid (train-only, stripped at export) + auto-exposure drift, so it
+        # OVERSTATES the model the user ends up with. Keep cc_* as a diagnostic when
+        # ns-eval emits it (bilateral-grid runs), but never let it be the score.
+        # LPIPS correlates best with human perception, so surface it too.
+        psnr = res.get("psnr")
+        ssim = res.get("ssim")
+        lpips = res.get("lpips")
         with LOCK:
             if psnr is not None:
                 JOBS[job_id]["psnr"] = float(psnr)
@@ -518,6 +522,11 @@ def _read_ns_metrics(job_id: str, metrics_path: str):
                 JOBS[job_id]["ssim"] = float(ssim)
             if lpips is not None:
                 JOBS[job_id]["lpips"] = float(lpips)
+            # Colour-corrected reference numbers, only when the eval produced them.
+            # Diagnostic (shows the exposure gap) — surfaced but not scored.
+            for k in ("cc_psnr", "cc_ssim", "cc_lpips"):
+                if res.get(k) is not None:
+                    JOBS[job_id][k] = float(res[k])
             JOBS[job_id]["verdict"] = _quality_verdict(
                 JOBS[job_id].get("psnr"), JOBS[job_id].get("ssim"), JOBS[job_id].get("sfm"))
     except (OSError, ValueError, TypeError):
@@ -723,6 +732,10 @@ class Handler(BaseHTTPRequestHandler):
                     out["verdict"] = j["verdict"]   # good | fair | poor | review
                 if j.get("sfm"):
                     out["sfm"] = j["sfm"]            # {points, reproj, track}
+                # Colour-corrected reference (bilateral-grid runs only) — a
+                # train-only diagnostic the app shows alongside the raw score.
+                if j.get("cc_psnr") is not None:
+                    out["cc_psnr"] = round(j["cc_psnr"], 2)
             if j.get("error"):
                 out["error"] = j["error"]
             return self._json(200, out)
