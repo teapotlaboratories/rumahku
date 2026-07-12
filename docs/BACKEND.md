@@ -87,7 +87,7 @@ new for the CUDA-11.8 nerfstudio image, so Splatfacto/COLMAP-CUDA pin to GPU 0).
 | `MAX_CONCURRENT` | `1` | jobs training at once (GPU-memory bound) |
 | `HOST_EXEC` | auto (`distrobox-host-exec`) | run Brush/podman on the host; `""` forces in-container |
 | `NERF_IMAGE` | `ghcr.io/nerfstudio-project/nerfstudio:latest` | Splatfacto image |
-| `RUMAHKU_TOKEN` | `""` (off) | if set, `/jobs` requires `Authorization: Bearer <token>` (`/health` stays open). **Required before exposing beyond the LAN.** The app must send the header when this is enabled. |
+| `RUMAHKU_TOKEN` | `""` (off) | if set, `/jobs` requires `Authorization: Bearer <token>` (`/health` stays open). **Required before exposing beyond the LAN.** The app sends it from Settings → "Access token"; keep the two in sync. |
 | `JOB_RETAIN_MAX` | `20` | keep the newest N finished job dirs |
 | `JOB_RETAIN_HOURS` | `168` | also delete finished dirs older than this |
 | `JOB_REAP_EVERY_S` | `3600` | reaper sweep interval |

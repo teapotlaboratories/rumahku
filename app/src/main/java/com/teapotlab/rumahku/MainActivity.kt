@@ -83,6 +83,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -451,6 +452,7 @@ private fun HomeScreen() {
     }
     if (showSettings) {
         var url by remember { mutableStateOf(Settings.backendUrl(context)) }
+        var token by remember { mutableStateOf(Settings.backendToken(context)) }
         var highRes by remember { mutableStateOf(Settings.highResCapture(context)) }
         var wireframe by remember { mutableStateOf(Settings.wireframeMesh(context)) }
         AlertDialog(
@@ -469,6 +471,13 @@ private fun HomeScreen() {
                     TextButton(onClick = { url = Settings.DEFAULT_BACKEND_URL }) {
                         Text("Reset to default")
                     }
+                    OutlinedTextField(
+                        value = token, onValueChange = { token = it }, singleLine = true,
+                        label = { Text("Access token (optional)") },
+                        supportingText = { Text("Only if the backend requires one; leave blank otherwise.") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    )
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -507,6 +516,7 @@ private fun HomeScreen() {
             confirmButton = {
                 TextButton(onClick = {
                     Settings.setBackendUrl(context, url)
+                    Settings.setBackendToken(context, token)
                     Settings.setHighResCapture(context, highRes)
                     Settings.setWireframeMesh(context, wireframe)
                     showSettings = false

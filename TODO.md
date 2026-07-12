@@ -65,8 +65,9 @@ the RTX 3080 (GPU0). Brush (Vulkan) is unaffected.
 - [ ] Validate `backend/Dockerfile` on a real cloud GPU (RunPod / vast.ai).
       (Image now also ships `colmap`+`numpy` for the refine path; still unvalidated.)
 - [x] **Token auth on `/jobs`** — opt-in `RUMAHKU_TOKEN` bearer check (`/health`
-      stays open); off by default for the laptop. App must send the header before
-      enabling. (Server-side + tested; client plumbing is the remaining piece.)
+      stays open); off by default for the laptop. Wired end-to-end: the app sends
+      `Authorization: Bearer <token>` from Settings → "Access token" on every
+      /jobs request (upload/poll/download/cancel). Server + client tested.
 - [x] **`.dockerignore` + deploy README** — `backend/.dockerignore`; ops/deploy
       section in `docs/BACKEND.md` (env vars, deploy steps, retention, auth).
 - [ ] Serverless option (RunPod Serverless / Modal) for scale-to-zero.
