@@ -63,10 +63,16 @@ the RTX 3080 (GPU0). Brush (Vulkan) is unaffected.
 ## Backlog
 ### Backend → cloud GPU
 - [ ] Validate `backend/Dockerfile` on a real cloud GPU (RunPod / vast.ai).
-- [ ] Token auth on `/jobs` (required before public exposure).
-- [ ] `.dockerignore` + deploy README.
+      (Image now also ships `colmap`+`numpy` for the refine path; still unvalidated.)
+- [x] **Token auth on `/jobs`** — opt-in `RUMAHKU_TOKEN` bearer check (`/health`
+      stays open); off by default for the laptop. App must send the header before
+      enabling. (Server-side + tested; client plumbing is the remaining piece.)
+- [x] **`.dockerignore` + deploy README** — `backend/.dockerignore`; ops/deploy
+      section in `docs/BACKEND.md` (env vars, deploy steps, retention, auth).
 - [ ] Serverless option (RunPod Serverless / Modal) for scale-to-zero.
-- [ ] Job retention / cleanup (old uploads + `.ply` pile up in `JOBS_DIR`).
+- [x] **Job retention / cleanup** — background reaper keeps the newest
+      `JOB_RETAIN_MAX` (20) finished job dirs + reaps any older than
+      `JOB_RETAIN_HOURS` (168h); queued/running untouched. Freed 13 GB on rollout.
 
 ### App features
 - [ ] Batch export — extend the home multi-select to export scans (`.ply`/`.zip`).
