@@ -10,8 +10,11 @@
 # Run:    docker run --gpus all -p 8000:8000 -v rumahku-jobs:/data/jobs rumahku-backend
 FROM nvidia/cuda:12.6.2-runtime-ubuntu24.04
 
+# python3 + Vulkan/X11 for Brush; numpy + colmap (CPU SIFT) for the optional
+# ?refine=colmap pose-prior path (backend/colmap_refine.py). colmap here is the
+# CPU build, which is what colmap_refine.py asks for (--use_gpu 0).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 libvulkan1 libx11-6 libxext6 ca-certificates \
+      python3 python3-numpy colmap libvulkan1 libx11-6 libxext6 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Request the Vulkan-capable driver injection (graphics), not just compute.
@@ -20,8 +23,9 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 
 # The Brush trainer binary (x86-64, built from the brush fork). Ship it in the
 # image, or bind-mount it at run time.
-COPY brush-cli /app/brush-cli
-COPY serve.py  /app/serve.py
+COPY brush-cli        /app/brush-cli
+COPY serve.py         /app/serve.py
+COPY colmap_refine.py /app/colmap_refine.py
 RUN chmod +x /app/brush-cli
 
 # In-container GPU execution (no distrobox host-exec on a real GPU host).

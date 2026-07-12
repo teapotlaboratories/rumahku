@@ -68,6 +68,47 @@ Builds for the server target (x86-64 + Vulkan/CUDA), reusing the training core.
 
 ## Open decisions
 - Output format: `.ply` (works with our viewer) vs `.spz`/`.splat` (smaller).
-- Output format: `.ply` (works with our viewer) vs `.spz`/`.splat` (smaller).
-- Auth + upload size limits (captures are ~tens of MB of JPEGs).
+- Upload size limits (captures are ~tens of MB of JPEGs).
 - Which GPU box is the "own GPU" for dev.
+
+## Operations (carbonite-noble, current dev backend)
+The backend runs as a **`systemd --user` service** (`rumahku-backend.service`)
+inside a distrobox on `carbonite-noble` (the maintainer's laptop — a dev backend,
+**not** production). Brush trains on the host GPU via `distrobox-host-exec`;
+Splatfacto runs from the nerfstudio image via host `podman --gpus all`. Two GPUs:
+an RTX 3080 (10 GB, GPU 0 — runs gsplat) and an RTX 5060 Ti (16 GB, GPU 1 — too
+new for the CUDA-11.8 nerfstudio image, so Splatfacto/COLMAP-CUDA pin to GPU 0).
+
+**Env vars** (all optional; defaults in parens):
+| Var | Default | Purpose |
+|---|---|---|
+| `PORT` | `8000` | listen port |
+| `JOBS_DIR` | `~/rumahku/jobs` | per-job uploads + training output |
+| `MAX_CONCURRENT` | `1` | jobs training at once (GPU-memory bound) |
+| `HOST_EXEC` | auto (`distrobox-host-exec`) | run Brush/podman on the host; `""` forces in-container |
+| `NERF_IMAGE` | `ghcr.io/nerfstudio-project/nerfstudio:latest` | Splatfacto image |
+| `RUMAHKU_TOKEN` | `""` (off) | if set, `/jobs` requires `Authorization: Bearer <token>` (`/health` stays open). **Required before exposing beyond the LAN.** The app must send the header when this is enabled. |
+| `JOB_RETAIN_MAX` | `20` | keep the newest N finished job dirs |
+| `JOB_RETAIN_HOURS` | `168` | also delete finished dirs older than this |
+| `JOB_REAP_EVERY_S` | `3600` | reaper sweep interval |
+
+**Retention:** a background reaper bounds `JOBS_DIR` — it keeps the newest
+`JOB_RETAIN_MAX` finished dirs and deletes any finished dir older than
+`JOB_RETAIN_HOURS`. Queued/running jobs are never touched. It sweeps hourly and
+once at startup, logging each deletion to stdout (`journalctl --user -u
+rumahku-backend`, or `docker logs`). Ground-truth check: `du -sh $JOBS_DIR` and
+its dir count. (On the carbonite-noble user-service the journal currently drops
+python stdout — a box quirk, not the app — so use `du` there.)
+
+**Deploy** (edit → copy → restart; no build step, zero-dep stdlib server):
+```sh
+scp backend/serve.py backend/colmap_refine.py deck@carbonite-noble:<rumahku>/
+ssh deck@carbonite-noble systemctl --user restart rumahku-backend.service
+curl -s http://127.0.0.1:8000/health          # {"ok":true,...}
+```
+
+**Container image** (`backend/Dockerfile`, for a real cloud GPU — still
+unvalidated end-to-end, see TODO): CUDA runtime + Vulkan for Brush, plus
+`colmap` (CPU SIFT) + `numpy` for the refine path; a `.dockerignore` keeps the
+build context to just the three copied files. Run:
+`docker run --gpus all -p 8000:8000 -v rumahku-jobs:/data/jobs rumahku-backend`.

@@ -1,0 +1,16 @@
+# Keep the Docker build context tiny — the Dockerfile COPYs only brush-cli,
+# serve.py and colmap_refine.py, so everything else is noise (and JOBS_DIR could
+# be gigabytes if someone points it inside backend/).
+jobs/
+out/
+__pycache__/
+*.pyc
+*.pyo
+*.bak
+*.bak[0-9]
+serve.py.bak*
+colmap_refine.py.bak*
+*.log
+*.out
+*.sh
+.DS_Store

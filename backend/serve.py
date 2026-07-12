@@ -32,6 +32,7 @@ import re
 import shutil
 import socketserver
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -45,6 +46,20 @@ PORT = int(os.environ.get("PORT", "8000"))
 # How many jobs may train at once. GPU training is memory-bound, so the default
 # is 1 (queue the rest) — bump it if the box has spare VRAM / multiple GPUs.
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
+# Opt-in bearer-token auth: when RUMAHKU_TOKEN is set, every /jobs request must
+# carry `Authorization: Bearer <token>`. Unset (the default) = open, for the
+# single-user laptop backend. /health is always open so a monitor can probe it.
+# Required before exposing this backend beyond the LAN.
+AUTH_TOKEN = os.environ.get("RUMAHKU_TOKEN", "")
+# Job-dir retention. Each finished job leaves ~0.2-2 GB under JOBS_DIR (images +
+# ns_out training artifacts + colmap); the result .ply is downloaded once, so
+# finished dirs are pure clutter and grow unbounded. The reaper keeps the newest
+# JOB_RETAIN_MAX finished dirs and additionally deletes any finished dir older
+# than JOB_RETAIN_HOURS. A queued/running job is never touched. Tune via env;
+# set JOB_RETAIN_MAX absurdly high to effectively disable count-based reaping.
+JOB_RETAIN_MAX = int(os.environ.get("JOB_RETAIN_MAX", "20"))
+JOB_RETAIN_HOURS = float(os.environ.get("JOB_RETAIN_HOURS", "168"))
+REAP_EVERY_S = float(os.environ.get("JOB_REAP_EVERY_S", "3600"))
 # When this backend runs inside a distrobox, the container's Vulkan falls back to
 # CPU (the NVIDIA userspace only works on the host), so training is ~20x slower.
 # Run brush-cli on the HOST via distrobox-host-exec instead — paths are identical
@@ -109,6 +124,72 @@ ITER_RE = re.compile(rb"iter[=\s]+(\d+)")            # Brush:      "iter=1234"
 # only ever matches one.
 STEP_RE = re.compile(rb"(\d+)\s*\(\d+(?:\.\d+)?%\)")  # Splatfacto: "1230 (12.30%)"
 PSNR_RE = re.compile(rb"PSNR\s+([\d.]+)\s+SSIM\s+([\d.]+)")
+
+
+def _dir_size(path):
+    """Bytes on disk under `path` (best-effort; skips vanished/unreadable files)."""
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def _job_terminal(job_id):
+    """True if the dir for `job_id` is safe to delete: its job has finished, or
+    it's an orphan from a previous run (a restart clears the in-memory JOBS, so
+    anything on disk with no live entry is left over from before)."""
+    with LOCK:
+        j = JOBS.get(job_id)
+    if j is None:
+        return True
+    return j.get("state") in ("done", "error", "cancelled")
+
+
+def _reap_jobs():
+    """Bound JOBS_DIR growth: keep the newest JOB_RETAIN_MAX finished job dirs and
+    delete any finished dir older than JOB_RETAIN_HOURS. Never touches a
+    queued/running job. Best-effort; logs each deletion and the total freed."""
+    try:
+        entries = []
+        for name in os.listdir(JOBS_DIR):
+            p = os.path.join(JOBS_DIR, name)
+            if os.path.isdir(p) and _job_terminal(name):
+                try:
+                    entries.append((os.path.getmtime(p), p, name))
+                except OSError:
+                    pass
+    except OSError:
+        return
+    entries.sort(reverse=True)   # newest first; index >= JOB_RETAIN_MAX is over cap
+    now = time.time()
+    freed = 0
+    for i, (mtime, p, name) in enumerate(entries):
+        over_cap = i >= JOB_RETAIN_MAX
+        too_old = (now - mtime) > JOB_RETAIN_HOURS * 3600
+        if not (over_cap or too_old):
+            continue
+        sz = _dir_size(p)
+        shutil.rmtree(p, ignore_errors=True)
+        with LOCK:
+            JOBS.pop(name, None)
+        freed += sz
+        print("reaped job %s (%d MB, %s)" % (
+            name, sz >> 20, "cap" if over_cap else "age"), flush=True)
+    if freed:
+        print("reaper freed %d MB (kept newest %d)" % (freed >> 20, JOB_RETAIN_MAX), flush=True)
+
+
+def _reaper_loop():
+    while True:
+        try:
+            _reap_jobs()
+        except Exception as e:  # noqa: BLE001 — never let the reaper kill the thread
+            print("reaper error: %s" % e, flush=True)
+        time.sleep(REAP_EVERY_S)
 
 
 def _worker():
@@ -447,9 +528,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authed(self):
+        """Opt-in auth: open when RUMAHKU_TOKEN is unset, otherwise require a
+        matching `Authorization: Bearer <token>` header. /health bypasses this."""
+        if not AUTH_TOKEN:
+            return True
+        return self.headers.get("Authorization", "") == "Bearer " + AUTH_TOKEN
+
     def do_POST(self):
         if not self.path.startswith("/jobs"):
             return self._json(404, {"error": "not found"})
+        if not self._authed():
+            return self._json(401, {"error": "unauthorized"})
         q = parse_qs(urlparse(self.path).query)
         iters = int(q.get("iters", ["2000"])[0])
         max_res = int(q.get("max_res", ["1024"])[0])
@@ -479,6 +569,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             return self._json(200, {"ok": True, "brush": os.path.exists(BRUSH)})
+        if not self._authed():
+            return self._json(401, {"error": "unauthorized"})
         parts = self.path.strip("/").split("/")
         if len(parts) >= 2 and parts[0] == "jobs":
             job_id = parts[1]
@@ -522,6 +614,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         """Cancel a job: kill the training process (if running) and mark it
         cancelled. A queued job is skipped when a worker reaches it."""
+        if not self._authed():
+            return self._json(401, {"error": "unauthorized"})
         parts = self.path.strip("/").split("/")
         if len(parts) >= 2 and parts[0] == "jobs":
             job_id = parts[1]
@@ -549,8 +643,18 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 if __name__ == "__main__":
+    # When stdout is a pipe (systemd journal, Docker), Python block-buffers it, so
+    # startup/reaper logs can sit unflushed for a long time. Force line buffering
+    # so `journalctl`/`docker logs` show them promptly.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:  # noqa: BLE001
+        pass
     print(f"rumahku backend on :{PORT}  (brush={BRUSH}, jobs={JOBS_DIR}, "
-          f"workers={MAX_CONCURRENT})", flush=True)
+          f"workers={MAX_CONCURRENT}, auth={'on' if AUTH_TOKEN else 'off'}, "
+          f"retain={JOB_RETAIN_MAX}/{JOB_RETAIN_HOURS:g}h)", flush=True)
     for _ in range(MAX_CONCURRENT):
         threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_reaper_loop, daemon=True).start()
     Server(("0.0.0.0", PORT), Handler).serve_forever()
