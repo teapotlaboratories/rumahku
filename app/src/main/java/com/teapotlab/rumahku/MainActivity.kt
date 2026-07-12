@@ -114,6 +114,7 @@ private class ScanMetrics(
     val verdict: String = "",        // good | fair | poor | review (from the backend QA gate)
     val sfmPoints: Int = 0,          // COLMAP triangulated points (0 = no SfM stats)
     val sfmReproj: Double = 0.0,     // mean reprojection error, px
+    val ccPsnr: Double = -1.0,       // colour-matched reference PSNR (train-only; -1 = absent)
 )
 private class Scan(
     val dir: File, val title: String, val thumb: File?, val status: ScanStatus,
@@ -373,14 +374,21 @@ private fun HomeScreen() {
                                 modifier = Modifier.padding(bottom = 6.dp))
                         }
                         MetricRow("PSNR", "%.2f dB".format(m.psnr))
+                        // Colour-matched PSNR (train-only affine colour correction)
+                        // only appears on bilateral-grid runs; it flatters the export
+                        // so it's shown as a reference, never the headline score.
+                        if (m.ccPsnr >= 0)
+                            MetricRow("PSNR · colour-matched", "%.2f dB".format(m.ccPsnr))
                         MetricRow("SSIM", "%.3f".format(m.ssim))
                         if (m.lpips >= 0) MetricRow("LPIPS", "%.3f".format(m.lpips))
                         MetricRow("Trainer", m.trainer.replaceFirstChar { it.uppercase() })
                         MetricRow("Iterations", "%,d".format(m.iters))
                         if (m.sfmPoints > 0)
                             MetricRow("SfM", "%,d pts · %.2f px".format(m.sfmPoints, m.sfmReproj))
-                        Text("Measured on held-out views — higher PSNR/SSIM and lower LPIPS = " +
-                            "closer to the real photos.",
+                        Text("Raw PSNR/SSIM on held-out views — what the exported model " +
+                            "actually renders. Higher PSNR/SSIM and lower LPIPS = closer to " +
+                            "the real photos." +
+                            if (m.ccPsnr >= 0) " Colour-matched is a train-only reference." else "",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 10.dp))
@@ -446,11 +454,15 @@ private fun HomeScreen() {
                     if (onDevice) {
                         // Brush runs locally via the native trainer. Splatfacto (CUDA)
                         // and COLMAP pose-refine need the server, so they stay cloud-only.
+                        // Resolution auto-adjusts to this device (see DeviceCapability).
+                        val devRes = remember(reconstructing) {
+                            DeviceCapability.plannedRes(context, buildRunning = reconstructing)
+                        }
                         fun onDev(iters: Int) {
                             launchBuild(context, targets.first(), iters)
                             buildTargets = emptyList(); exitSelection()
                         }
-                        Text("Runs offline on this phone (Brush, 720p) — no server needed, slower.",
+                        Text("Runs offline on this phone (Brush, ${devRes}p) — no server needed, slower.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(bottom = 4.dp))
@@ -813,7 +825,8 @@ private fun loadMetrics(dir: File): ScanMetrics? = try {
             lpips = it.optDouble("lpips", -1.0),
             verdict = it.optString("verdict", ""),
             sfmPoints = sfm?.optInt("points") ?: 0,
-            sfmReproj = sfm?.optDouble("reproj") ?: 0.0)
+            sfmReproj = sfm?.optDouble("reproj") ?: 0.0,
+            ccPsnr = it.optDouble("cc_psnr", -1.0))
     }
 } catch (e: Exception) {
     null

@@ -30,6 +30,11 @@ Status: **BLOCKED (exposure lock) — validated on-device** · Target: +2–4 dB
 > **Corollary (important):** `cc_psnr` **overstates** exported quality. Brush
 > reports **raw** PSNR and is our genuinely-best *exported*-quality trainer; the
 > per-scan score should report raw PSNR, not cc.
+> **(Done 2026-07-12:** `serve.py` reports raw as the headline score and stashes
+> `cc_psnr` only as a labeled diagnostic when ns-eval emits it; the app shows raw
+> PSNR with an optional "colour-matched" reference row. In practice the deployed
+> jobs' `metrics.json` carried only `psnr` anyway — the flip makes raw-first
+> intentional and robust rather than an accident of the missing cc key.)
 >
 > **Net:** every cheap/medium algorithmic lever is measured-dead. Quality is
 > **capture-bound** — the same pipeline yields 19.7 on a poor sweep and 23.4 on a
