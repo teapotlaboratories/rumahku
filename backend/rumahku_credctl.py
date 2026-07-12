@@ -47,12 +47,11 @@ def save(creds):
     holds secrets, so keep it owner-only and never leave a half-written file."""
     os.makedirs(os.path.dirname(CREDS_FILE) or ".", exist_ok=True)
     tmp = CREDS_FILE + ".tmp"
-    with open(tmp, "w") as f:
+    # Create the temp file 0600 from the outset (os.open with mode) so the token
+    # is never briefly world-readable between write and a later chmod.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump({"credentials": creds}, f, indent=2)
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
     os.replace(tmp, CREDS_FILE)
 
 
