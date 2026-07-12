@@ -36,8 +36,8 @@ object CloudBuild {
      * `<scanDir>/cloud.ply`. Returns that file. Throws on failure.
      */
     suspend fun build(
-        scanDir: File, iters: Int, maxRes: Int, baseUrl: String, trainer: String = "brush",
-        refine: String = "", onProgress: (Progress) -> Unit,
+        scanDir: File, iters: Int, maxRes: Int, baseUrl: String, token: String = "",
+        trainer: String = "brush", refine: String = "", onProgress: (Progress) -> Unit,
     ): File = withContext(Dispatchers.IO) {
         onProgress(Progress("Packaging"))
         val zip = File(scanDir.parentFile, "${scanDir.name}_upload.zip")
@@ -45,7 +45,7 @@ object CloudBuild {
             zipDataset(scanDir, zip)
 
             onProgress(Progress("Uploading", pct = 0))
-            val jobId = postJob(zip, iters, maxRes, baseUrl, trainer, refine) { pct ->
+            val jobId = postJob(zip, iters, maxRes, baseUrl, token, trainer, refine) { pct ->
                 onProgress(Progress("Uploading", pct = pct))
             }
             Log.i(TAG, "cloud job $jobId started")
@@ -56,7 +56,7 @@ object CloudBuild {
             var verdict = ""
             var sfm: JSONObject? = null
             while (true) {
-                val st = getStatus(jobId, baseUrl)
+                val st = getStatus(jobId, baseUrl, token)
                 if (st.has("psnr")) {          // held-out quality (present once evaluated)
                     psnr = st.optDouble("psnr", psnr)
                     ssim = st.optDouble("ssim", ssim)
@@ -96,7 +96,7 @@ object CloudBuild {
             // the viewer loads from there.
             val out = File(scanDir, "splat/cloud.ply")
             out.parentFile?.mkdirs()
-            downloadResult(jobId, baseUrl, out)
+            downloadResult(jobId, baseUrl, token, out)
             if (psnr > 0) writeMetrics(scanDir, psnr, ssim, lpips, verdict, sfm, iters, trainer)
             onProgress(Progress("Done"))
             out
@@ -136,12 +136,18 @@ object CloudBuild {
         }
     }
 
-    private fun postJob(zip: File, iters: Int, maxRes: Int, baseUrl: String, trainer: String, refine: String, onUpload: (Int) -> Unit): String {
+    /** Attach the backend bearer token if one is configured (empty = open). */
+    private fun HttpURLConnection.bearer(token: String) {
+        if (token.isNotEmpty()) setRequestProperty("Authorization", "Bearer $token")
+    }
+
+    private fun postJob(zip: File, iters: Int, maxRes: Int, baseUrl: String, token: String, trainer: String, refine: String, onUpload: (Int) -> Unit): String {
         // eval_split=8 holds out every 8th view so the backend reports a held-out
         // PSNR/SSIM (the standard 3DGS convention) — that's the per-scan metric.
         val conn = URL("$baseUrl/jobs?iters=$iters&max_res=$maxRes&trainer=$trainer&refine=$refine&eval_split=8").openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
+        conn.bearer(token)
         conn.setRequestProperty("Content-Type", "application/zip")
         conn.setFixedLengthStreamingMode(zip.length())
         conn.connectTimeout = 15000; conn.readTimeout = 60000
@@ -164,23 +170,26 @@ object CloudBuild {
         return JSONObject(body).getString("job_id")
     }
 
-    private fun getStatus(jobId: String, baseUrl: String): JSONObject {
+    private fun getStatus(jobId: String, baseUrl: String, token: String): JSONObject {
         val conn = URL("$baseUrl/jobs/$jobId").openConnection() as HttpURLConnection
+        conn.bearer(token)
         conn.connectTimeout = 10000; conn.readTimeout = 15000
         return JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
     }
 
-    private fun downloadResult(jobId: String, baseUrl: String, out: File) {
+    private fun downloadResult(jobId: String, baseUrl: String, token: String, out: File) {
         val conn = URL("$baseUrl/jobs/$jobId/result").openConnection() as HttpURLConnection
+        conn.bearer(token)
         conn.connectTimeout = 15000; conn.readTimeout = 120000
         conn.inputStream.use { ins -> out.outputStream().use { ins.copyTo(it) } }
     }
 
     /** Ask the backend to cancel a job (kills the GPU training). Best-effort. */
-    fun cancelJob(jobId: String, baseUrl: String) {
+    fun cancelJob(jobId: String, baseUrl: String, token: String = "") {
         try {
             val conn = URL("$baseUrl/jobs/$jobId").openConnection() as HttpURLConnection
             conn.requestMethod = "DELETE"
+            conn.bearer(token)
             conn.connectTimeout = 8000; conn.readTimeout = 8000
             conn.responseCode
             conn.disconnect()

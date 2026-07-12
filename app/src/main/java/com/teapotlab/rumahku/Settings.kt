@@ -9,6 +9,7 @@ import android.content.Context
 object Settings {
     private const val PREFS = "rumahku_prefs"
     private const val KEY_BACKEND_URL = "backend_url"
+    private const val KEY_BACKEND_TOKEN = "backend_token"
     private const val KEY_HIGH_RES = "high_res_capture"
     private const val KEY_WIREFRAME_MESH = "wireframe_mesh"
 
@@ -48,6 +49,21 @@ object Settings {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_BACKEND_URL, url.trim().trimEnd('/'))
+            .apply()
+    }
+
+    /** Optional bearer token for the backend. Empty (the default) = no auth
+     *  header, for the open single-user backend. When set it's sent as
+     *  `Authorization: Bearer <token>` on every /jobs request and must match the
+     *  backend's `RUMAHKU_TOKEN`. */
+    fun backendToken(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_BACKEND_TOKEN, "")?.trim() ?: ""
+
+    fun setBackendToken(context: Context, token: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_BACKEND_TOKEN, token.trim())
             .apply()
     }
 }

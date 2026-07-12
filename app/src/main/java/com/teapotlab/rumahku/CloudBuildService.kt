@@ -66,9 +66,10 @@ class CloudBuildService : Service() {
         }
         setJob(dir, JobState("Starting"))
         val baseUrl = Settings.backendUrl(this)
+        val token = Settings.backendToken(this)
         running[dir] = scope.launch {
             try {
-                CloudBuild.build(File(dir), iters, maxRes, baseUrl, trainer, refine) { p ->
+                CloudBuild.build(File(dir), iters, maxRes, baseUrl, token, trainer, refine) { p ->
                     setJob(dir, JobState(p.phase, p.pct, p.iter, p.total, p.elapsed, jobId = p.jobId))
                 }
                 setJob(dir, JobState("Done", done = true))
@@ -91,8 +92,9 @@ class CloudBuildService : Service() {
         running[dir]?.cancel()
         jobs.value[dir]?.jobId?.let { jobId ->
             val baseUrl = Settings.backendUrl(this)
+            val token = Settings.backendToken(this)
             // Raw thread so the DELETE still fires even if the service stops.
-            Thread { CloudBuild.cancelJob(jobId, baseUrl) }.start()
+            Thread { CloudBuild.cancelJob(jobId, baseUrl, token) }.start()
         }
         clearJob(dir)
         stopIfIdle()
