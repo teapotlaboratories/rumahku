@@ -46,11 +46,16 @@ PORT = int(os.environ.get("PORT", "8000"))
 # How many jobs may train at once. GPU training is memory-bound, so the default
 # is 1 (queue the rest) — bump it if the box has spare VRAM / multiple GPUs.
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
-# Opt-in bearer-token auth: when RUMAHKU_TOKEN is set, every /jobs request must
-# carry `Authorization: Bearer <token>`. Unset (the default) = open, for the
-# single-user laptop backend. /health is always open so a monitor can probe it.
-# Required before exposing this backend beyond the LAN.
+# Bearer-token auth. A request to /jobs is authorized if its `Authorization:
+# Bearer <token>` matches RUMAHKU_TOKEN (a bootstrap env token) OR any *active*
+# credential in CREDS_FILE (named, per-device tokens managed by the credctl TUI,
+# backend/rumahku_credctl.py). When neither exists the backend is OPEN (the
+# single-user default). /health is always open so a monitor can probe it.
 AUTH_TOKEN = os.environ.get("RUMAHKU_TOKEN", "")
+CREDS_FILE = os.environ.get("RUMAHKU_CREDS", os.path.expanduser("~/rumahku/credentials.json"))
+# Tokens are cached and only re-read when CREDS_FILE's mtime changes, so the TUI's
+# add/revoke takes effect on the next request without restarting the server.
+_CREDS_CACHE = {"mtime": None, "tokens": frozenset()}
 # Job-dir retention. Each finished job leaves ~0.2-2 GB under JOBS_DIR (images +
 # ns_out training artifacts + colmap); the result .ply is downloaded once, so
 # finished dirs are pure clutter and grow unbounded. The reaper keeps the newest
@@ -124,6 +129,31 @@ ITER_RE = re.compile(rb"iter[=\s]+(\d+)")            # Brush:      "iter=1234"
 # only ever matches one.
 STEP_RE = re.compile(rb"(\d+)\s*\(\d+(?:\.\d+)?%\)")  # Splatfacto: "1230 (12.30%)"
 PSNR_RE = re.compile(rb"PSNR\s+([\d.]+)\s+SSIM\s+([\d.]+)")
+
+
+def _active_tokens():
+    """The set of bearer tokens that authorize a request: RUMAHKU_TOKEN (if set)
+    plus every active credential in CREDS_FILE. Re-reads the file only when its
+    mtime changes. Empty set => the backend is open."""
+    tokens = set()
+    if AUTH_TOKEN:
+        tokens.add(AUTH_TOKEN)
+    try:
+        mtime = os.path.getmtime(CREDS_FILE)
+    except OSError:
+        return tokens                      # no creds file => just the env token
+    if _CREDS_CACHE["mtime"] != mtime:
+        fresh = set()
+        try:
+            with open(CREDS_FILE) as f:
+                for c in json.load(f).get("credentials", []):
+                    if c.get("active", True) and c.get("token"):
+                        fresh.add(c["token"])
+        except (OSError, ValueError, TypeError):
+            fresh = set()
+        _CREDS_CACHE["mtime"] = mtime      # atomic dict writes under the GIL;
+        _CREDS_CACHE["tokens"] = frozenset(fresh)   # re-read is idempotent
+    return tokens | _CREDS_CACHE["tokens"]
 
 
 def _dir_size(path):
@@ -529,11 +559,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authed(self):
-        """Opt-in auth: open when RUMAHKU_TOKEN is unset, otherwise require a
-        matching `Authorization: Bearer <token>` header. /health bypasses this."""
-        if not AUTH_TOKEN:
+        """True if the request may proceed. Open when no tokens are configured;
+        otherwise require `Authorization: Bearer <token>` matching an active
+        token. /health bypasses this (checked by its callers)."""
+        tokens = _active_tokens()
+        if not tokens:
             return True
-        return self.headers.get("Authorization", "") == "Bearer " + AUTH_TOKEN
+        hdr = self.headers.get("Authorization", "")
+        if not hdr.startswith("Bearer "):
+            return False
+        return hdr[len("Bearer "):] in tokens
 
     def do_POST(self):
         if not self.path.startswith("/jobs"):
@@ -651,8 +686,9 @@ if __name__ == "__main__":
         sys.stderr.reconfigure(line_buffering=True)
     except Exception:  # noqa: BLE001
         pass
+    _ntok = len(_active_tokens())
     print(f"rumahku backend on :{PORT}  (brush={BRUSH}, jobs={JOBS_DIR}, "
-          f"workers={MAX_CONCURRENT}, auth={'on' if AUTH_TOKEN else 'off'}, "
+          f"workers={MAX_CONCURRENT}, auth={'on (%d token%s)' % (_ntok, '' if _ntok == 1 else 's') if _ntok else 'off'}, "
           f"retain={JOB_RETAIN_MAX}/{JOB_RETAIN_HOURS:g}h)", flush=True)
     for _ in range(MAX_CONCURRENT):
         threading.Thread(target=_worker, daemon=True).start()

@@ -23,9 +23,10 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 
 # The Brush trainer binary (x86-64, built from the brush fork). Ship it in the
 # image, or bind-mount it at run time.
-COPY brush-cli        /app/brush-cli
-COPY serve.py         /app/serve.py
-COPY colmap_refine.py /app/colmap_refine.py
+COPY brush-cli          /app/brush-cli
+COPY serve.py           /app/serve.py
+COPY colmap_refine.py   /app/colmap_refine.py
+COPY rumahku_credctl.py /app/rumahku_credctl.py
 RUN chmod +x /app/brush-cli
 
 # In-container GPU execution (no distrobox host-exec on a real GPU host).
