@@ -1,5 +1,44 @@
 # Quality Capture Mode — locked-exposure photo pass
 
+Status: **BLOCKED (exposure lock) — validated on-device** · Target: +2–4 dB splat PSNR
+
+> ## ⚠️ Verdict (M1b + M1c spikes, Pixel 6, on-device)
+> **You cannot freeze exposure through ARCore's SharedCamera.** Two diagnostic
+> builds proved it:
+> - **M1b** — `CONTROL_AE_LOCK=true` / `CONTROL_AWB_LOCK=true` in the *initial*
+>   request: the flags were **overridden** — `aeState` stayed SEARCHING, ISO swung
+>   4.4× (162→711) across the sweep.
+> - **M1c** — full manual `CONTROL_AE_MODE_OFF` + fixed `SENSOR_EXPOSURE_TIME`/ISO
+>   in the initial request: **also overridden** — the sensor ran ARCore's own AE
+>   (1/59 s, ISO 104→711, `aeState` never OFF/LOCKED).
+>
+> ARCore keeps auto-exposure running for its own tracking/depth; the **only**
+> exposure key that sticks is the fast-shutter **FPS-range cap** (already in
+> ADAPTIVE). **Good news:** depth-from-motion *survives* anything set in the
+> initial request (`miss=0` over 179 + frames, live mesh built normally) — so the
+> depth-safety fear is retired, but there is nothing to be depth-safe *about*.
+>
+> **Follow-up A/Bs (controlled, on the box) — all three levers measured NEGATIVE:**
+> 1. **Tone/WB normalization** (per-image channel-mean equalization) → −0.03 dB
+>    for Brush despite a huge tone spread (channel means varied 60–82 /255). No help.
+> 2. **Blur rejection** (drop the blurriest 15%) → 19.75 PSNR vs **19.78 for
+>    dropping a *random* 15%** → just data loss, not a blur-specific gain.
+> 3. **Bilateral grid** (the Splatfacto lever) → turning it ON made the *exported*
+>    model **worse** (raw PSNR 18.06 vs 19.22, SSIM 0.628 vs 0.646). Its famous
+>    "+2 dB" is entirely `cc_psnr` — a train-only correction stripped at export.
+>
+> **Corollary (important):** `cc_psnr` **overstates** exported quality. Brush
+> reports **raw** PSNR and is our genuinely-best *exported*-quality trainer; the
+> per-scan score should report raw PSNR, not cc.
+>
+> **Net:** every cheap/medium algorithmic lever is measured-dead. Quality is
+> **capture-bound** — the same pipeline yields 19.7 on a poor sweep and 23.4 on a
+> good one. The only remaining lever is **capture consistency** (a guidance-UX
+> effort), or accepting ~23.5 raw as the practical phone-capture ceiling.
+>
+> The rest of this doc's "lock AE/AWB" design is retained only as the record of
+> why that path is closed.
+
 Status: proposed · Owner: — · Target: +2–4 dB splat PSNR (the road to ~27 dB)
 
 ## Why this, why now
