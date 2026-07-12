@@ -24,6 +24,7 @@ the Python standard library so it runs anywhere python3 is present; the design
 Env: BRUSH_CLI (path to the brush-cli binary), JOBS_DIR, PORT.
 """
 import glob
+import hmac
 import io
 import json
 import os
@@ -33,6 +34,7 @@ import shutil
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -43,9 +45,23 @@ from urllib.parse import urlparse, parse_qs
 BRUSH = os.environ.get("BRUSH_CLI", os.path.expanduser("~/rumahku/brush-cli"))
 JOBS_DIR = os.environ.get("JOBS_DIR", os.path.expanduser("~/rumahku/jobs"))
 PORT = int(os.environ.get("PORT", "8000"))
+# Listen address. Defaults to all interfaces (correct for the container/cloud
+# deploy behind its own network controls), but the laptop deploy should set
+# BIND to the VPN address (e.g. the NetBird IP) so :8000 is NOT reachable from
+# the plain LAN — only over the encrypted mesh.
+BIND = os.environ.get("BIND", "0.0.0.0")
 # How many jobs may train at once. GPU training is memory-bound, so the default
 # is 1 (queue the rest) — bump it if the box has spare VRAM / multiple GPUs.
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
+# Upload guards: cap the compressed body, the total uncompressed size, and the
+# entry count so a huge or zip-bomb upload can't OOM the process or fill the disk.
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(3 * 1024**3)))       # 3 GiB compressed
+MAX_UNCOMPRESSED = int(os.environ.get("MAX_UNCOMPRESSED", str(12 * 1024**3)))      # 12 GiB extracted
+MAX_ENTRIES = int(os.environ.get("MAX_ENTRIES", "20000"))
+# Clamp training params so one request can't monopolise the single GPU worker
+# forever or drive the rasteriser to OOM the card.
+ITERS_MAX = int(os.environ.get("ITERS_MAX", "60000"))
+RES_MAX = int(os.environ.get("RES_MAX", "2048"))
 # Bearer-token auth. A request to /jobs is authorized if its `Authorization:
 # Bearer <token>` matches RUMAHKU_TOKEN (a bootstrap env token) OR any *active*
 # credential in CREDS_FILE (named, per-device tokens managed by the credctl TUI,
@@ -55,7 +71,7 @@ AUTH_TOKEN = os.environ.get("RUMAHKU_TOKEN", "")
 CREDS_FILE = os.environ.get("RUMAHKU_CREDS", os.path.expanduser("~/rumahku/credentials.json"))
 # Tokens are cached and only re-read when CREDS_FILE's mtime changes, so the TUI's
 # add/revoke takes effect on the next request without restarting the server.
-_CREDS_CACHE = {"mtime": None, "tokens": frozenset()}
+_CREDS_CACHE = {"mtime": None, "tokens": frozenset(), "broken": False}
 # Job-dir retention. Each finished job leaves ~0.2-2 GB under JOBS_DIR (images +
 # ns_out training artifacts + colmap); the result .ply is downloaded once, so
 # finished dirs are pure clutter and grow unbounded. The reaper keeps the newest
@@ -141,18 +157,23 @@ def _active_tokens():
     try:
         mtime = os.path.getmtime(CREDS_FILE)
     except OSError:
-        return tokens                      # no creds file => just the env token
+        _CREDS_CACHE["broken"] = False     # file absent => legitimately no creds
+        return tokens
     if _CREDS_CACHE["mtime"] != mtime:
-        fresh = set()
         try:
             with open(CREDS_FILE) as f:
+                fresh = set()
                 for c in json.load(f).get("credentials", []):
                     if c.get("active", True) and c.get("token"):
                         fresh.add(c["token"])
+            _CREDS_CACHE["mtime"] = mtime          # atomic dict writes under the GIL
+            _CREDS_CACHE["tokens"] = frozenset(fresh)
+            _CREDS_CACHE["broken"] = False
         except (OSError, ValueError, TypeError):
-            fresh = set()
-        _CREDS_CACHE["mtime"] = mtime      # atomic dict writes under the GIL;
-        _CREDS_CACHE["tokens"] = frozenset(fresh)   # re-read is idempotent
+            # Present but unreadable/malformed: KEEP the last-known-good tokens and
+            # flag broken (don't advance mtime, so we retry next request). _authed
+            # then fails CLOSED instead of silently reopening the backend.
+            _CREDS_CACHE["broken"] = True
     return tokens | _CREDS_CACHE["tokens"]
 
 
@@ -549,7 +570,39 @@ def _find_dataset_root(base: str):
     return None
 
 
+def _safe_extract(zf, dest, max_bytes, max_entries):
+    """Extract a zip member-by-member into `dest`, bounding the total uncompressed
+    bytes (defeats zip bombs even with lying size headers, since we count bytes we
+    actually write) and rejecting entries that would escape `dest` (zip-slip)."""
+    infos = zf.infolist()
+    if len(infos) > max_entries:
+        raise ValueError(f"too many entries ({len(infos)} > {max_entries})")
+    dest_real = os.path.realpath(dest)
+    total = 0
+    for info in infos:
+        target = os.path.realpath(os.path.join(dest, info.filename))
+        if target != dest_real and not target.startswith(dest_real + os.sep):
+            raise ValueError(f"unsafe path in zip: {info.filename}")
+        if info.is_dir():
+            os.makedirs(target, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with zf.open(info) as src, open(target, "wb") as dst:
+            while True:
+                chunk = src.read(1 << 20)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError(f"uncompressed size exceeds {max_bytes} bytes")
+                dst.write(chunk)
+
+
 class Handler(BaseHTTPRequestHandler):
+    # Abort a stalled socket read (slowloris / dribbled body) instead of pinning a
+    # thread forever. Applies per socket operation, so a steady large upload is fine.
+    timeout = 60
+
     def _json(self, code, obj):
         body = json.dumps(obj).encode()
         self.send_response(code)
@@ -559,16 +612,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authed(self):
-        """True if the request may proceed. Open when no tokens are configured;
-        otherwise require `Authorization: Bearer <token>` matching an active
-        token. /health bypasses this (checked by its callers)."""
+        """True if the request may proceed. Open only when no auth is configured
+        at all; if credentials are configured but currently unreadable/malformed,
+        fail CLOSED rather than silently reopening. Constant-time token compare.
+        /health bypasses this (checked by its callers)."""
         tokens = _active_tokens()
-        if not tokens:
-            return True
         hdr = self.headers.get("Authorization", "")
-        if not hdr.startswith("Bearer "):
-            return False
-        return hdr[len("Bearer "):] in tokens
+        supplied = hdr[len("Bearer "):] if hdr.startswith("Bearer ") else None
+        if tokens:
+            return supplied is not None and any(
+                hmac.compare_digest(supplied, t) for t in tokens)
+        # No active tokens: open unless the creds file is present-but-broken.
+        return not _CREDS_CACHE.get("broken", False)
 
     def do_POST(self):
         if not self.path.startswith("/jobs"):
@@ -576,24 +631,51 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return self._json(401, {"error": "unauthorized"})
         q = parse_qs(urlparse(self.path).query)
-        iters = int(q.get("iters", ["2000"])[0])
-        max_res = int(q.get("max_res", ["1024"])[0])
-        eval_split = int(q.get("eval_split", ["0"])[0])   # hold out every Nth view for PSNR
+        try:
+            iters = int(q.get("iters", ["2000"])[0])
+            max_res = int(q.get("max_res", ["1024"])[0])
+            eval_split = int(q.get("eval_split", ["0"])[0])   # hold out every Nth view for PSNR
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return self._json(400, {"error": "bad numeric parameter"})
+        iters = max(1, min(iters, ITERS_MAX))             # clamp so one request can't
+        max_res = max(64, min(max_res, RES_MAX))          # monopolise / OOM the GPU
         trainer = q.get("trainer", ["brush"])[0]          # brush | splatfacto
         refine = q.get("refine", [""])[0]                 # "" | colmap (pose-prior)
-        n = int(self.headers.get("Content-Length", "0"))
         if n <= 0:
             return self._json(400, {"error": "empty body (expected dataset.zip)"})
-        data = self.rfile.read(n)
+        if n > MAX_UPLOAD_BYTES:
+            return self._json(413, {"error": f"upload too large (> {MAX_UPLOAD_BYTES} bytes)"})
         job_id = uuid.uuid4().hex[:12]
         ds_dir = os.path.join(JOBS_DIR, job_id)
         os.makedirs(ds_dir, exist_ok=True)
+        tmp_name = None
         try:
-            zipfile.ZipFile(io.BytesIO(data)).extractall(ds_dir)
+            # Stream the body to a temp file in bounded chunks — never hold the whole
+            # upload in RAM — reading at most the declared Content-Length.
+            with tempfile.NamedTemporaryFile(dir=JOBS_DIR, delete=False) as tmp:
+                tmp_name = tmp.name
+                remaining = n
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+                    remaining -= len(chunk)
+            with zipfile.ZipFile(tmp_name) as zf:
+                _safe_extract(zf, ds_dir, MAX_UNCOMPRESSED, MAX_ENTRIES)
         except Exception as e:  # noqa: BLE001
-            return self._json(400, {"error": f"bad zip: {e}"})
+            shutil.rmtree(ds_dir, ignore_errors=True)   # don't leave a partial dir
+            return self._json(400, {"error": f"bad upload: {e}"})
+        finally:
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
         root = _find_dataset_root(ds_dir)
         if not root:
+            shutil.rmtree(ds_dir, ignore_errors=True)
             return self._json(400, {"error": "no transforms.json in upload"})
         with LOCK:
             JOBS[job_id] = {"state": "queued", "queued_at": time.time(),
@@ -687,10 +769,22 @@ if __name__ == "__main__":
     except Exception:  # noqa: BLE001
         pass
     _ntok = len(_active_tokens())
-    print(f"rumahku backend on :{PORT}  (brush={BRUSH}, jobs={JOBS_DIR}, "
+    print(f"rumahku backend on {BIND}:{PORT}  (brush={BRUSH}, jobs={JOBS_DIR}, "
           f"workers={MAX_CONCURRENT}, auth={'on (%d token%s)' % (_ntok, '' if _ntok == 1 else 's') if _ntok else 'off'}, "
           f"retain={JOB_RETAIN_MAX}/{JOB_RETAIN_HOURS:g}h)", flush=True)
+    # BIND may name an interface (e.g. the NetBird VPN) that isn't up yet at boot,
+    # so retry for a minute before giving up rather than crash-looping.
+    srv = None
+    for attempt in range(60):
+        try:
+            srv = Server((BIND, PORT), Handler)
+            break
+        except OSError as e:
+            print(f"bind {BIND}:{PORT} failed ({e}); retry {attempt + 1}/60", flush=True)
+            time.sleep(1)
+    if srv is None:
+        raise SystemExit(f"could not bind {BIND}:{PORT} after 60s")
     for _ in range(MAX_CONCURRENT):
         threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_reaper_loop, daemon=True).start()
-    Server(("0.0.0.0", PORT), Handler).serve_forever()
+    srv.serve_forever()

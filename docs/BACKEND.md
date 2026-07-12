@@ -83,8 +83,13 @@ new for the CUDA-11.8 nerfstudio image, so Splatfacto/COLMAP-CUDA pin to GPU 0).
 | Var | Default | Purpose |
 |---|---|---|
 | `PORT` | `8000` | listen port |
+| `BIND` | `0.0.0.0` | listen address. **Set to the NetBird IP on the laptop** (`100.127.152.116`) so `:8000` is reachable only over the VPN, not the plain LAN. Binds with retry so a not-yet-up VPN at boot doesn't crash-loop. |
 | `JOBS_DIR` | `~/rumahku/jobs` | per-job uploads + training output |
 | `MAX_CONCURRENT` | `1` | jobs training at once (GPU-memory bound) |
+| `MAX_UPLOAD_BYTES` | `3 GiB` | reject a larger compressed upload with 413 before reading it |
+| `MAX_UNCOMPRESSED` | `12 GiB` | abort extraction past this many bytes (zip-bomb guard; counts bytes actually written) |
+| `MAX_ENTRIES` | `20000` | max zip entries |
+| `ITERS_MAX` / `RES_MAX` | `60000` / `2048` | clamp `iters` / `max_res` so one request can't monopolise/OOM the GPU |
 | `HOST_EXEC` | auto (`distrobox-host-exec`) | run Brush/podman on the host; `""` forces in-container |
 | `NERF_IMAGE` | `ghcr.io/nerfstudio-project/nerfstudio:latest` | Splatfacto image |
 | `RUMAHKU_TOKEN` | `""` (off) | bootstrap bearer token; if set, `/jobs` requires `Authorization: Bearer <token>` (`/health` stays open). Usually left empty — prefer named credentials (below). |
@@ -96,7 +101,10 @@ new for the CUDA-11.8 nerfstudio image, so Splatfacto/COLMAP-CUDA pin to GPU 0).
 **Credentials (auth):** a request to `/jobs` is allowed if its `Authorization:
 Bearer <token>` matches `RUMAHKU_TOKEN` **or** any *active* credential in
 `RUMAHKU_CREDS`. With neither, the backend is **open** (the single-user default).
-Manage per-device tokens with the curses TUI — run it over SSH on the box:
+Auth **fails closed**: if the creds file exists but is unreadable/malformed, the
+server keeps the last-known-good tokens and denies rather than silently reopening
+(only an absent file / all-revoked creds reopens it). Token compare is
+constant-time. Manage per-device tokens with the curses TUI — run it over SSH on the box:
 ```sh
 python3 rumahku_credctl.py          # a=add  ⏎=reveal  r=revoke/enable  d=delete
 python3 rumahku_credctl.py --list   # or --add "<name>"  (non-interactive)
