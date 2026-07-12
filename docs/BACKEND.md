@@ -87,10 +87,26 @@ new for the CUDA-11.8 nerfstudio image, so Splatfacto/COLMAP-CUDA pin to GPU 0).
 | `MAX_CONCURRENT` | `1` | jobs training at once (GPU-memory bound) |
 | `HOST_EXEC` | auto (`distrobox-host-exec`) | run Brush/podman on the host; `""` forces in-container |
 | `NERF_IMAGE` | `ghcr.io/nerfstudio-project/nerfstudio:latest` | Splatfacto image |
-| `RUMAHKU_TOKEN` | `""` (off) | if set, `/jobs` requires `Authorization: Bearer <token>` (`/health` stays open). **Required before exposing beyond the LAN.** The app sends it from Settings → "Access token"; keep the two in sync. |
+| `RUMAHKU_TOKEN` | `""` (off) | bootstrap bearer token; if set, `/jobs` requires `Authorization: Bearer <token>` (`/health` stays open). Usually left empty — prefer named credentials (below). |
+| `RUMAHKU_CREDS` | `~/rumahku/credentials.json` | file of named, per-device tokens managed by the credctl TUI |
 | `JOB_RETAIN_MAX` | `20` | keep the newest N finished job dirs |
 | `JOB_RETAIN_HOURS` | `168` | also delete finished dirs older than this |
 | `JOB_REAP_EVERY_S` | `3600` | reaper sweep interval |
+
+**Credentials (auth):** a request to `/jobs` is allowed if its `Authorization:
+Bearer <token>` matches `RUMAHKU_TOKEN` **or** any *active* credential in
+`RUMAHKU_CREDS`. With neither, the backend is **open** (the single-user default).
+Manage per-device tokens with the curses TUI — run it over SSH on the box:
+```sh
+python3 rumahku_credctl.py          # a=add  ⏎=reveal  r=revoke/enable  d=delete
+python3 rumahku_credctl.py --list   # or --add "<name>"  (non-interactive)
+```
+serve.py re-reads the file on its next request (mtime-cached), so add/revoke
+takes effect **live, no restart**. Flow to turn auth on: add a credential → the
+backend immediately requires it → paste that token into the app (Settings →
+"Access token"). Adding the *first* credential flips the backend from open to
+locked, so set the app token right after (an in-flight app that lacks it gets
+401s until you do). Revoking/deleting the last active credential reopens it.
 
 **Retention:** a background reaper bounds `JOBS_DIR` — it keeps the newest
 `JOB_RETAIN_MAX` finished dirs and deletes any finished dir older than
