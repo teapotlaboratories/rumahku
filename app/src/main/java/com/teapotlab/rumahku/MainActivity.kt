@@ -429,20 +429,45 @@ private fun HomeScreen() {
             },
             text = {
                 Column {
-                    QualityOption("Cloud · Fast", "1500 iters · GPU, ~2 min") { runCloud(1500, 720) }
-                    QualityOption("Cloud · Balanced", "3000 iters · GPU, ~5 min") { runCloud(3000, 1024) }
-                    QualityOption("Cloud · High", "6000 iters · best quality") { runCloud(6000, 1600) }
-                    QualityOption("Cloud · High+", "6000 iters · COLMAP pose refine (+~5 min)") {
-                        runCloud(6000, 1600, refine = "colmap")
+                    // Engine: Cloud (GPU backend) vs On-device (offline Brush on the
+                    // phone). On-device is a single foreground build, so it's only
+                    // offered for one scan.
+                    var onDevice by remember { mutableStateOf(false) }
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                        SegmentedButton(
+                            selected = !onDevice, onClick = { onDevice = false },
+                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                        ) { Text("Cloud") }
+                        SegmentedButton(
+                            selected = onDevice, onClick = { onDevice = true }, enabled = !multi,
+                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                        ) { Text("On-device") }
                     }
-                    QualityOption("Cloud · Splatfacto", "experimental · COLMAP-SfM + de-haze · ~30 min") {
-                        runCloud(30000, 1600, trainer = "splatfacto")
-                    }
-                    // On-device is a single foreground build, so only for one scan.
-                    if (!multi) {
-                        QualityOption("On-device", "2000 iters · offline, slower") {
-                            launchBuild(context, targets.first(), 2000)
+                    if (onDevice) {
+                        // Brush runs locally via the native trainer. Splatfacto (CUDA)
+                        // and COLMAP pose-refine need the server, so they stay cloud-only.
+                        fun onDev(iters: Int) {
+                            launchBuild(context, targets.first(), iters)
                             buildTargets = emptyList(); exitSelection()
+                        }
+                        Text("Runs offline on this phone (Brush, 720p) — no server needed, slower.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 4.dp))
+                        QualityOption("Fast", "2000 iters · a few min") { onDev(2000) }
+                        QualityOption("Balanced", "4000 iters · slower") { onDev(4000) }
+                        QualityOption("High", "6000 iters · slowest, best on-device") { onDev(6000) }
+                        QualityOption("Splatfacto / High+", "cloud only — needs the GPU server",
+                            enabled = false) {}
+                    } else {
+                        QualityOption("Fast", "1500 iters · GPU, ~2 min") { runCloud(1500, 720) }
+                        QualityOption("Balanced", "3000 iters · GPU, ~5 min") { runCloud(3000, 1024) }
+                        QualityOption("High", "6000 iters · best quality") { runCloud(6000, 1600) }
+                        QualityOption("High+", "6000 iters · COLMAP pose refine (+~5 min)") {
+                            runCloud(6000, 1600, refine = "colmap")
+                        }
+                        QualityOption("Splatfacto", "experimental · COLMAP-SfM + de-haze · ~30 min") {
+                            runCloud(30000, 1600, trainer = "splatfacto")
                         }
                     }
                 }
@@ -557,11 +582,21 @@ private fun MetricRow(label: String, value: String) {
 }
 
 @Composable
-private fun QualityOption(title: String, subtitle: String, onClick: () -> Unit) {
-    Column(Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 10.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(subtitle, style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun QualityOption(
+    title: String, subtitle: String, enabled: Boolean = true, onClick: () -> Unit,
+) {
+    val titleColor = if (enabled) MaterialTheme.colorScheme.onSurface
+        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+    val subColor = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant
+        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+    Column(
+        Modifier.fillMaxWidth()
+            .then(if (enabled) Modifier.clickable { onClick() } else Modifier)
+            .padding(vertical = 10.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold, color = titleColor)
+        Text(subtitle, style = MaterialTheme.typography.bodySmall, color = subColor)
     }
 }
 
