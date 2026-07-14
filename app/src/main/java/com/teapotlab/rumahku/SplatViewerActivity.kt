@@ -124,28 +124,72 @@ private fun loadScene(datasetDir: String): Scene? {
 /** World position of a capture standpoint (translation of its c2w matrix). */
 private fun standpointPos(m: FloatArray) = floatArrayOf(m[3], m[7], m[11])
 
-/**
- * Pick the standpoint to move to on a directional double-tap: the nearest one
- * that lies within ~66° of the look direction [fwd]. Falls back to the next
- * standpoint if nothing is ahead (or [fwd] is unavailable).
- */
-private fun nextStandpoint(frames: List<FloatArray>, cur: Int, fwd: FloatArray?): Int {
-    if (fwd == null || fwd.size < 3) return (cur + 1) % frames.size
-    val p = standpointPos(frames[cur])
-    var best = -1
-    var bestDist = Float.MAX_VALUE
-    for (j in frames.indices) {
-        if (j == cur) continue
-        val pj = standpointPos(frames[j])
-        val dx = pj[0] - p[0]; val dy = pj[1] - p[1]; val dz = pj[2] - p[2]
-        val dist = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
-        if (dist < 1e-4f) continue
-        val cos = (dx * fwd[0] + dy * fwd[1] + dz * fwd[2]) / dist // alignment with look dir
-        if (cos > 0.4f && dist < bestDist) {
-            best = j; bestDist = dist
-        }
+/** Euclidean distance from camera [pose]'s position to the nearest capture standpoint. */
+private fun nearestStandpointDist(frames: List<FloatArray>, pose: FloatArray): Float {
+    val p = standpointPos(pose)
+    var best = Float.MAX_VALUE
+    for (f in frames) {
+        val q = standpointPos(f)
+        val dx = q[0] - p[0]; val dy = q[1] - p[1]; val dz = q[2] - p[2]
+        val d = dx * dx + dy * dy + dz * dz
+        if (d < best) best = d
     }
-    return if (best >= 0) best else (cur + 1) % frames.size
+    return kotlin.math.sqrt(best)
+}
+
+/** Index of the capture standpoint nearest camera [pose] (keeps the position counter honest). */
+private fun nearestStandpointIdx(frames: List<FloatArray>, pose: FloatArray): Int {
+    val p = standpointPos(pose)
+    var best = Float.MAX_VALUE; var bi = 0
+    for (i in frames.indices) {
+        val q = standpointPos(frames[i])
+        val dx = q[0] - p[0]; val dy = q[1] - p[1]; val dz = q[2] - p[2]
+        val d = dx * dx + dy * dy + dz * dz
+        if (d < best) { best = d; bi = i }
+    }
+    return bi
+}
+
+/**
+ * Best capture standpoint ahead of camera [pose] along look direction [fwd]: within a
+ * ~75° forward cone, ranked by alignment-over-distance (nearer + better aligned wins).
+ * Returns -1 when nothing is ahead — the caller stays put rather than blindly cycling
+ * to the next recorded frame (the old behaviour that felt like "it just advances").
+ */
+private fun forwardStandpoint(frames: List<FloatArray>, pose: FloatArray, fwd: FloatArray?): Int {
+    if (fwd == null || fwd.size < 3) return -1
+    val p = standpointPos(pose)
+    var best = -1; var bestScore = 0f
+    for (j in frames.indices) {
+        val q = standpointPos(frames[j])
+        val dx = q[0] - p[0]; val dy = q[1] - p[1]; val dz = q[2] - p[2]
+        val dist = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+        if (dist < 1e-3f) continue
+        val cos = (dx * fwd[0] + dy * fwd[1] + dz * fwd[2]) / dist   // alignment with look dir
+        if (cos <= 0.25f) continue                                  // ~75° cone ahead
+        val score = cos / dist                                      // aligned + near wins
+        if (score > bestScore) { bestScore = score; best = j }
+    }
+    return best
+}
+
+/** Median nearest-neighbour spacing of the standpoints — sets the walk step + drift cap
+ *  in scene units so movement feels the same regardless of the reconstruction's scale. */
+private fun standpointSpacing(frames: List<FloatArray>): Float {
+    if (frames.size < 2) return 1f
+    val nn = FloatArray(frames.size)
+    for (i in frames.indices) {
+        val a = standpointPos(frames[i]); var best = Float.MAX_VALUE
+        for (j in frames.indices) if (j != i) {
+            val b = standpointPos(frames[j])
+            val dx = b[0] - a[0]; val dy = b[1] - a[1]; val dz = b[2] - a[2]
+            val d = dx * dx + dy * dy + dz * dz
+            if (d < best) best = d
+        }
+        nn[i] = kotlin.math.sqrt(best)
+    }
+    nn.sort()
+    return nn[nn.size / 2].coerceAtLeast(1e-3f)
 }
 
 /** Share the exported .ply via the system sheet (content:// URI, FileProvider). */
@@ -172,13 +216,28 @@ private fun WalkthroughScreen(datasetDir: String?) {
             return@BoxWithConstraints
         }
 
-        var sp by remember { mutableIntStateOf(scene.frames.size / 2) }
+        val start = scene.frames.size / 2
+        var sp by remember { mutableIntStateOf(start) }
+        // Live camera pose: a c2w matrix whose translation we move for free-fly walking.
+        // Teleports copy a standpoint's pose; walking edits only the position, so you
+        // keep looking where you're going.
+        var pose by remember { mutableStateOf(scene.frames[start].copyOf()) }
         var yaw by remember { mutableFloatStateOf(0f) }
         var pitch by remember { mutableFloatStateOf(0f) }
         var fov by remember { mutableFloatStateOf(1f) }
         var version by remember { mutableIntStateOf(0) }   // bumped on every gesture change
         var bmp by remember { mutableStateOf<Bitmap?>(null) }
         val ctx = LocalContext.current
+
+        // Walk step + drift cap in scene units (median standpoint spacing).
+        val spacing = remember(scene) { standpointSpacing(scene.frames) }
+        val step = spacing * 0.45f       // forward distance per double-tap
+        val maxDrift = spacing * 0.9f    // how far you may free-fly from any standpoint
+        // Teleport the camera onto capture standpoint [i], facing its captured view.
+        fun snapTo(i: Int) {
+            sp = i.coerceIn(0, scene.frames.size - 1)
+            pose = scene.frames[sp].copyOf(); yaw = 0f; pitch = 0f; version++
+        }
 
         // Render at the screen's aspect (downscaled for speed; upscaled to fill).
         val wPx = constraints.maxWidth.coerceAtLeast(1)
@@ -191,7 +250,7 @@ private fun WalkthroughScreen(datasetDir: String?) {
             val h = (w.toLong() * hPx / wPx).toInt().coerceIn(1, 1400)
             val px = withContext(Dispatchers.Default) {
                 BrushTrainer.nativeRenderLook(
-                    scene.plyPath, scene.frames[sp], yaw, pitch, fov,
+                    scene.plyPath, pose, yaw, pitch, fov,
                     scene.flX, scene.flY, scene.w, scene.h, w, h,
                     if (scene.gravityUp) 1 else 0,
                 )
@@ -238,12 +297,33 @@ private fun WalkthroughScreen(datasetDir: String?) {
                 }
             }
             .pointerInput(Unit) {
-                detectTapGestures(onDoubleTap = {
-                    // Move to the standpoint in the direction we're looking.
-                    val fwd = BrushTrainer.nativeLookForward(scene.frames[sp], yaw, pitch)
-                    sp = nextStandpoint(scene.frames, sp, fwd)
-                    yaw = 0f; pitch = 0f; version++
-                })
+                detectTapGestures(
+                    // Double-tap = WALK forward along your gaze. A splat has no geometry
+                    // where the camera never went, so stay within maxDrift of a captured
+                    // standpoint; when a step would leave the data, hop to the next scan
+                    // standpoint ahead instead (and if there's none ahead, stay put).
+                    onDoubleTap = {
+                        val fwd = BrushTrainer.nativeLookForward(pose, yaw, pitch)
+                        if (fwd != null) {
+                            val cand = pose.copyOf()
+                            cand[3] += fwd[0] * step; cand[7] += fwd[1] * step; cand[11] += fwd[2] * step
+                            if (nearestStandpointDist(scene.frames, cand) <= maxDrift) {
+                                pose = cand
+                                sp = nearestStandpointIdx(scene.frames, pose)
+                                version++
+                            } else {
+                                val j = forwardStandpoint(scene.frames, pose, fwd)
+                                if (j >= 0) snapTo(j)
+                            }
+                        }
+                    },
+                    // Long-press = fast-travel straight to the next scan standpoint ahead.
+                    onLongPress = {
+                        val j = forwardStandpoint(scene.frames, pose,
+                            BrushTrainer.nativeLookForward(pose, yaw, pitch))
+                        if (j >= 0) snapTo(j)
+                    },
+                )
             }
 
         // Fullscreen render (the whole surface is the control).
@@ -263,24 +343,24 @@ private fun WalkthroughScreen(datasetDir: String?) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            IconPill(Icons.Filled.KeyboardArrowLeft, "previous frame",
-                Modifier.clickable { sp = (sp - 1).coerceAtLeast(0); version++ })
+            IconPill(Icons.Filled.KeyboardArrowLeft, "previous standpoint",
+                Modifier.clickable { snapTo(sp - 1) })
             Pill("${sp + 1} / ${scene.frames.size}")
-            IconPill(Icons.Filled.KeyboardArrowRight, "next frame",
-                Modifier.clickable { sp = (sp + 1).coerceAtMost(scene.frames.size - 1); version++ })
+            IconPill(Icons.Filled.KeyboardArrowRight, "next standpoint",
+                Modifier.clickable { snapTo(sp + 1) })
         }
 
         IconPill(Icons.Filled.Refresh, "recenter", Modifier
             .align(Alignment.TopEnd)
             .padding(top = 24.dp, end = 16.dp)
-            .clickable { yaw = 0f; pitch = 0f; fov = 1f })
+            .clickable { yaw = 0f; pitch = 0f; fov = 1f; version++ })
 
         IconPill(Icons.Filled.Share, "share", Modifier
             .align(Alignment.TopStart)
             .padding(top = 24.dp, start = 16.dp)
             .clickable { sharePly(ctx, scene.plyPath) })
 
-        Text("drag: look   ·   pinch: zoom   ·   double-tap: move",
+        Text("drag: look   ·   pinch: zoom   ·   2-tap: walk   ·   hold: jump ahead",
             color = Color.White.copy(alpha = 0.85f),
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 34.dp))
